@@ -1,10 +1,12 @@
 name: Release
 
-# 推送 v* 标签(如 v0.1.0)时,三平台并行构建安装包并上传到 GitHub Releases
+# 推送 v* 标签(如 v0.1.0)时,三平台并行构建安装包并上传到 GitHub Releases;
+# 也可在 Actions 页手动触发(Run workflow)用于测试
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
