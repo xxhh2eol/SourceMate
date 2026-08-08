@@ -13,7 +13,29 @@ on:
   workflow_dispatch:
 
 jobs:
+  # 预创建 Release(已存在则跳过):避免三平台并行 publish 时竞态创建同名 Release 导致资产分散
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      # tag 触发用 tag 名(v0.1.0);手动触发用 package.json 版本
+      - name: Resolve release name
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create or skip release
+        run: gh release create "${{ steps.ver.outputs.name }}" --repo "${{ github.repository }}" --generate-notes || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   build:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
