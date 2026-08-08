@@ -1,0 +1,31 @@
+appId: com.sourcemate.app
+productName: SourceMate
+directories:
+  output: dist
+files:
+  - out/**
+  - drizzle/**
+  - package.json
+# node:sqlite 为 Node 内置模块，无需原生依赖与 asarUnpack
+win:
+  target:
+    - nsis
+  icon: build/icon.png
+  artifactName: ${productName}-Setup-${version}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: SourceMate
+linux:
+  target:
+    - AppImage
+  icon: build/icon.png
+  category: Development
+  artifactName: ${productName}-${version}.${ext}
+mac:
+  target:
+    - dmg
+  icon: build/icon.png
+  category: public.app-category.developer-tools
+  artifactName: ${productName}-${version}.${ext}

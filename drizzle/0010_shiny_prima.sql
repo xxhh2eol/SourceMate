@@ -1,0 +1,1 @@
+ALTER TABLE `projects` ADD `readme_ai_model` text;

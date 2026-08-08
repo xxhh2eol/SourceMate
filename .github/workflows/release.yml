@@ -1,0 +1,44 @@
+name: Release
+
+# 推送 v* 标签(如 v0.1.0)时,三平台并行构建安装包并上传到 GitHub Releases
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            args: --win
+          - os: macos-latest
+            args: --mac
+          - os: ubuntu-latest
+            args: --linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # node:sqlite 为 Node 内置模块，需要 Node 22+；electron-vite 构建用 runner 的 node
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (electron-vite)
+        run: npm run build
+
+      - name: Package
+        # electron-builder --publish always:自动创建/更新 GitHub Release 并上传产物
+        run: npx electron-builder --publish always ${{ matrix.args }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS 无 Apple 开发者证书:跳过签名(产物可下载,打开需右键→打开)
+          CSC_IDENTITY_AUTO_DISCOVERY: false

@@ -1,0 +1,262 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 页面通用容器 */
+.page-container {
+  padding: 20px 24px;
+  overflow: auto;
+  height: 100%;
+}
+
+.page-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.page-desc {
+  color: rgba(0, 0, 0, 0.45);
+  margin-bottom: 16px;
+}
+
+/* ---- 气泡标签筛选器（设计文档 §5） ---- */
+.bubble {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition:
+    transform 0.15s ease,
+    opacity 0.15s ease,
+    filter 0.15s ease;
+}
+
+.bubble:not(.bubble-burst):hover {
+  transform: scale(1.08);
+}
+
+.bubble-selected {
+  font-weight: 600;
+}
+
+/* 破灭：爆裂动效后置灰保留原位，不可点击 */
+.bubble-burst {
+  animation: bubble-burst 0.35s ease forwards;
+  cursor: not-allowed;
+  opacity: 0.38;
+  filter: grayscale(1);
+  border-style: dashed !important;
+}
+
+@keyframes bubble-burst {
+  0% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  40% {
+    transform: scale(1.3);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(0.82);
+    opacity: 0.38;
+  }
+}
+
+/* ---- 侧栏「我的分类」（分类二级菜单） ---- */
+.category-item:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.category-remove {
+  visibility: hidden;
+}
+
+.category-item:hover .category-remove {
+  visibility: visible;
+}
+
+/* ---- 可拖动列宽（GitHub 凭据账号表格，自定义表头实现） ---- */
+.agm-resizable-table th {
+  position: relative;
+}
+
+.agm-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 1;
+}
+
+.agm-resize-handle:hover {
+  background: rgba(22, 119, 255, 0.15);
+}
+
+/* 列宽拖动期间：全局 col-resize 光标 + 禁用文本选中 */
+body.agm-col-resizing,
+body.agm-col-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
+/* ---- 模型卡片操作项（开关/图标 + 文字说明） ---- */
+.model-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.model-action span {
+  font-size: 11px;
+  line-height: 1;
+  color: rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
+}
+
+/* ---- Markdown 渲染（设计文档 §3 README） ---- */
+/* 字体经 --md-font / --md-mono CSS 变量注入（MarkdownViewer 按设置下发），未设置时回落到系统栈 */
+.markdown-body {
+  font-family: var(
+    --md-font,
+    -apple-system,
+    'PingFang SC',
+    'Hiragino Sans GB',
+    'Microsoft YaHei',
+    sans-serif
+  );
+  line-height: 1.7;
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin: 1.2em 0 0.5em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.markdown-body h1 {
+  font-size: 1.7em;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+  padding-bottom: 0.3em;
+}
+
+.markdown-body h2 {
+  font-size: 1.4em;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+  padding-bottom: 0.3em;
+}
+
+.markdown-body p {
+  margin: 0.6em 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.6em;
+  margin: 0.6em 0;
+}
+
+.markdown-body code {
+  background: rgba(128, 128, 128, 0.12);
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
+  font-size: 0.9em;
+  font-family: var(--md-mono, Consolas, Menlo, monospace);
+}
+
+.markdown-body pre {
+  background: #f6f8fa;
+  border-radius: 8px;
+  padding: 14px 16px;
+  overflow: auto;
+  margin: 0.8em 0;
+}
+
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 13px;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  width: 100%;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  padding: 6px 12px;
+  text-align: left;
+}
+
+.markdown-body th {
+  background: rgba(128, 128, 128, 0.08);
+  font-weight: 600;
+}
+
+.markdown-body blockquote {
+  border-left: 4px solid rgba(128, 128, 128, 0.4);
+  margin: 0.8em 0;
+  padding: 0.2em 1em;
+  color: rgba(0, 0, 0, 0.55);
+}
+
+.markdown-body img {
+  max-width: 100%;
+}
+
+.markdown-body a {
+  color: #1677ff;
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+/* AI 分析页：有进行中任务的项目行——背景流光（等效卡片 BorderBeam） */
+@keyframes agm-row-beam {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.agm-row-processing,
+.agm-row-processing > td {
+  background: linear-gradient(90deg, transparent, rgba(22, 119, 255, 0.13), transparent) !important;
+  background-size: 200% 100% !important;
+  animation: agm-row-beam 1.6s linear infinite;
+}

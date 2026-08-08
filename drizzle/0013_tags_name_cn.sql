@@ -1,0 +1,1 @@
+ALTER TABLE `tags` ADD `name_cn` text;

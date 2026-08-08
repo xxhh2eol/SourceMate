@@ -1,0 +1,1 @@
+ALTER TABLE `release_analyses` ADD `description_zh` text;

@@ -1,0 +1,1 @@
+ALTER TABLE `projects` ADD `readme_zh_ai_cache` text;
