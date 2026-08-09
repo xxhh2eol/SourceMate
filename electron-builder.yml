@@ -7,6 +7,10 @@ productName: SourceMate
 publish:
   provider: github
   releaseType: release
+compression: maximum
+electronLanguages:
+  - en-US
+  - zh-CN
 directories:
   output: dist
 files:
