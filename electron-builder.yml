@@ -2,8 +2,11 @@ appId: com.sourcemate.app
 productName: SourceMate
 # 显式声明发布目标:GitHub Releases(--publish always 时 electron-builder 才知道上传到哪,
 # 否则静默跳过发布,构建成功但无资产)
+# releaseType: release 关键——electron-builder 默认期望 draft 草稿,与 create-release 预创建的
+# 正式 release 类型不兼容会直接跳过上传(existingType=release vs publishingType=draft)
 publish:
   provider: github
+  releaseType: release
 directories:
   output: dist
 files:
