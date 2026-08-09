@@ -1,5 +1,9 @@
 appId: com.sourcemate.app
 productName: SourceMate
+# 显式声明发布目标:GitHub Releases(--publish always 时 electron-builder 才知道上传到哪,
+# 否则静默跳过发布,构建成功但无资产)
+publish:
+  provider: github
 directories:
   output: dist
 files:
