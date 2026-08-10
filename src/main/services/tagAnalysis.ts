@@ -528,13 +528,15 @@ export async function runTagAnalysis(projectId: number): Promise<TagAnalysisResu
   const matched = [...vocabMatched, ...novelMatched]
 
   // 写库：source='ai'（先删旧 AI 关联再写；其他来源先占的同名标签跳过；
-  // nameCn 透传供已存在标签回填中文名——三维标签全部翻译的收敛路径）
+  // nameCn 透传供已存在标签回填中文名——三维标签全部翻译的收敛路径）。
+  // matched 的 normalizedTag 已统一为库中规范名（hit.name），此处不再 normalizeTagName：
+  // 再小写化会让「插件/Skill」变成「插件/skill」，精确查找建出大小写变体重复行。
   if (matched.length > 0) {
     replaceProjectTags(
       projectId,
       'ai',
       matched.map((m) => ({
-        name: normalizeTagName(m.normalizedTag),
+        name: m.normalizedTag,
         dimension: TAG_TYPE_DIMENSION[m.tagType] ?? 'capability',
         nameCn: m.nameCn,
         confidence: m.confidence,

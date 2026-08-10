@@ -30,7 +30,6 @@ export const useProjectStore = create<ProjectState>()((set, get) => ({
 
   addProject: async (url) => {
     const result = await window.api.addProject(url)
-    await get().load()
     return { project: result.project, duplicate: result.duplicate, metaError: result.metaError }
   },
 

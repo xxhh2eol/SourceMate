@@ -36,6 +36,13 @@ export default function AddProjectModal({
       !existingKeys.has(`${u.owner.toLowerCase()}/${u.repo.toLowerCase()}`)
   )
 
+  /** 关闭弹窗时清空输入与本次会话状态，避免下次打开残留上次粘贴的地址 */
+  const handleClose = (): void => {
+    setValue('')
+    setAddedKeys(new Set())
+    onClose()
+  }
+
   const submit = async (): Promise<void> => {
     if (newItems.length === 0 || busy) return
     setBusy(true)
@@ -54,7 +61,7 @@ export default function AddProjectModal({
 
   /** 跳转设置页 GitHub 凭据，勾选账号批量拉取 Star 项目 */
   const goImportStarred = (): void => {
-    onClose()
+    handleClose()
     navigate('/settings/credentials')
   }
 
@@ -62,7 +69,7 @@ export default function AddProjectModal({
     <Modal
       title={t('dashboard.addProject')}
       open={open}
-      onCancel={onClose}
+      onCancel={handleClose}
       footer={[
         <div
           key="footer"
@@ -72,7 +79,7 @@ export default function AddProjectModal({
             {t('dashboard.addStarredBtn')}
           </Button>
           <Space>
-            <Button onClick={onClose}>{t('common.cancel')}</Button>
+            <Button onClick={handleClose}>{t('common.cancel')}</Button>
             <Button
               type="primary"
               loading={busy}

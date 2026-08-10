@@ -809,7 +809,7 @@ export function rejectTag(tagId: number): void {
 
 /**
  * 创建候选标签（AI 环节三 create_candidate）：status='candidate'，不挂项目，待人工确认后 promote。
- * 名称已存在（任何状态）则复用返回——rejected 复用时会重置为 candidate（防"幽灵标签"：
+ * 名称已存在（任何状态，大小写不敏感）则复用返回——rejected 复用时会重置为 candidate（防"幽灵标签"：
  * 即使 AI 绕过黑名单，被拒标签也回到候选池可见可管理，而不是以 rejected 状态挂回项目）。
  * nameCn 为中文展示名（可空）；已存在且中文名为空、本次提供时回填（AI 首次产出英文、后续产出中文时自动补上）。
  */
@@ -817,7 +817,9 @@ export function createCandidateTag(name: string, dimension: TagDimension, nameCn
   const db = getDb()
   const existing = toRow<TagRow>(
     db
-      .prepare('SELECT id, name, name_cn AS nameCn, dimension, status, alias_of AS aliasOf FROM tags WHERE name = ?')
+      .prepare(
+        'SELECT id, name, name_cn AS nameCn, dimension, status, alias_of AS aliasOf FROM tags WHERE name COLLATE NOCASE = ?'
+      )
       .get(name)
   )
   if (existing) {
@@ -846,12 +848,18 @@ export function createCandidateTag(name: string, dimension: TagDimension, nameCn
   }
 }
 
-/** 按名称获取标签（存在则返回），否则创建后返回（status 默认 official）；nameCn 规则同 createCandidateTag */
+/**
+ * 按名称获取标签（存在则返回），否则创建后返回（status 默认 official）；nameCn 规则同 createCandidateTag。
+ * 名称查找大小写不敏感（COLLATE NOCASE）：AI/话题的小写形式与语言/词表的规范大小写视为同一标签，
+ * 防止「插件/Skill」与「插件/skill」这类大小写变体各自建行。
+ */
 export function getOrCreateTag(name: string, dimension: TagDimension, nameCn?: string | null): TagInfo {
   const db = getDb()
   const existing = toRow<TagRow>(
     db
-      .prepare('SELECT id, name, name_cn AS nameCn, dimension, status, alias_of AS aliasOf FROM tags WHERE name = ?')
+      .prepare(
+        'SELECT id, name, name_cn AS nameCn, dimension, status, alias_of AS aliasOf FROM tags WHERE name COLLATE NOCASE = ?'
+      )
       .get(name)
   )
   if (existing) {
@@ -912,7 +920,8 @@ export interface ProjectTagInput {
 /**
  * 按来源替换项目的标签集合（language/topics 同步、AI 重分析共用）：
  * 先删该来源全部关联，再逐个写入；标签已存在（其他来源先占）则跳过，实现「先到先得」去重。
- * 名称归一化由调用方完成（tagNormalize），DAO 不感知。
+ * 名称归一化由调用方完成（tagNormalize）；DAO 按大小写不敏感查找已有标签，
+ * 防止归一化后的小写形式与库中规范大小写（如「插件/Skill」）各自建行。
  */
 export function replaceProjectTags(
   projectId: number,

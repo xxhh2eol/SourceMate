@@ -126,14 +126,18 @@ export default function Dashboard(): React.JSX.Element {
         errors.push(cleanErrorMessage(err))
       }
     }
-    const parts: string[] = []
-    if (added > 0) parts.push(t('dashboard.added', { added }))
-    if (duplicates > 0) parts.push(t('dashboard.duplicates', { duplicates }))
-    if (errors.length > 0) parts.push(t('dashboard.failed', { count: errors.length }))
-    message.success(parts.join('，'))
+    // 全部添加完毕后的统一结果提示
+    message.success(
+      t('dashboard.batchAddResult', {
+        added,
+        duplicates,
+        failed: errors.length
+      })
+    )
     if (errors.length > 0) message.warning(errors.slice(0, 3).join('；'))
-    // 刷新项目列表：已存在判断与库保持同步（本次添加的成为「已存在」）
-    await load()
+    // 先返回结果让弹窗立即把本次添加项标记为「已添加」，再异步刷新列表；
+    // 若先 await load()，「已存在」判断会抢先刷新并覆盖掉「已添加」的显示
+    void load()
     return { added: addedKeys }
   }
 
