@@ -506,7 +506,7 @@ export function registerIpcHandlers(): void {
     const analyzedVersions = new Set(listReleaseAnalyses(projectId).map((a) => a.version))
     const newReleases = fetched.filter((r) => !analyzedVersions.has(r.tagName))
 
-    // 3. AI 分析差集：翻译版本说明 + 补全 sha256 + 生成文件平台说明，逐版本写回
+    // 3. AI 分析差集：翻译版本说明，并按需补全 sha256 / 文件说明（本地规则优先），逐版本写回
     if (newReleases.length > 0) {
       try {
         const { result, tokens, model } = await analyzeReleaseVersions(newReleases)

@@ -35,10 +35,20 @@ export interface UnknownTag {
   reason: string
 }
 
-/** 解析后的环节二输出 */
+/** 解析后的环节二输出（按输入列表序号 i 引用原始标签） */
 export interface TagNormalizeResult {
-  matchedTags: NormalizedTag[]
-  unknownTags: UnknownTag[]
+  matches: Array<{
+    i: number
+    matchedExistingTag: string
+    confidence: number
+    reason: string
+  }>
+  unknowns: Array<{
+    i: number
+    suggestedTagName?: string
+    confidence: number
+    reason: string
+  }>
 }
 
 export const TAG_NORMALIZE_SYSTEM_PROMPT = `你是一名标签系统归一化专家，负责将 AI 分析出的项目标签映射到已有标签库。
@@ -52,7 +62,7 @@ export const TAG_NORMALIZE_SYSTEM_PROMPT = `你是一名标签系统归一化专
 3. 如果标签语义相同但表达不同，应归一化到已有标签。
 4. 如果不能确定是否匹配，应标记为 unknown，而不是强行匹配。
 5. 不允许直接创建正式标签。
-6. 未知标签只能作为 unknownTags 输出。
+6. 未知标签只能作为 unknowns 输出。
 7. 最终只输出合法 JSON，不要输出解释、Markdown、注释或代码块。
 
 匹配优先级：
@@ -75,21 +85,18 @@ export const TAG_NORMALIZE_SYSTEM_PROMPT = `你是一名标签系统归一化专
 输出格式（严格按此 JSON，无其他内容）：
 
 {
-  "matchedTags": [
+  "matches": [
     {
-      "rawTag": "原始标签",
-      "normalizedTag": "归一化后的标签名",
+      "i": 0,
       "matchedExistingTag": "匹配到的已有正式标签名",
-      "tagType": "type | domain | technology | capability | scenario | targetUser",
       "confidence": 0.0,
       "reason": "匹配理由"
     }
   ],
-  "unknownTags": [
+  "unknowns": [
     {
-      "rawTag": "原始标签",
+      "i": 1,
       "suggestedTagName": "建议候选标签名",
-      "tagType": "type | domain | technology | capability | scenario | targetUser",
       "confidence": 0.0,
       "reason": "为什么它暂时不能匹配已有标签"
     }
@@ -98,9 +105,13 @@ export const TAG_NORMALIZE_SYSTEM_PROMPT = `你是一名标签系统归一化专
 
 输出要求：
 
-1. confidence 必须是 0 到 1 之间的小数。
-2. 如果某个标签无法匹配已有标签，必须放入 unknownTags。
-3. 不要输出 JSON 以外的任何内容，不要 Markdown 代码块。`
+1. i 是「需要处理的标签」列表中的序号，从 0 开始，必须与输入列表一一对应。
+2. 每个输入标签必须且只能出现在 matches 或 unknowns 中，不能遗漏，也不要输出不存在的序号。
+3. matches 中的 matchedExistingTag 必须使用已有正式标签库中的规范名。
+4. unknowns 中的 suggestedTagName 仅在建议名与原始标签不同时输出，相同则省略。
+5. confidence 必须是 0 到 1 之间的小数。
+6. 不要输出 rawTag、tagType、name_cn 等已在输入中提供的字段。
+7. 不要输出 JSON 以外的任何内容，不要 Markdown 代码块。`
 
 export function buildTagNormalizeUserPrompt(
   existingTags: string[],
@@ -108,8 +119,10 @@ export function buildTagNormalizeUserPrompt(
 ): string {
   const existingText = existingTags.length > 0 ? existingTags.join('\n') : '（暂无）'
   const itemsText = items
-    .map((i) =>
-      i.nameCn ? `- ${i.rawTag}（中文：${i.nameCn}，类型：${i.tagType}）` : `- ${i.rawTag}（类型：${i.tagType}）`
+    .map((i, idx) =>
+      i.nameCn
+        ? `${idx}. ${i.rawTag}（中文：${i.nameCn}，类型：${i.tagType}）`
+        : `${idx}. ${i.rawTag}（类型：${i.tagType}）`
     )
     .join('\n')
   return `请根据已有标签库，对以下 AI 分析结果中的标签进行归一化和匹配。
@@ -118,7 +131,7 @@ export function buildTagNormalizeUserPrompt(
 
 ${existingText}
 
-需要处理的标签：
+需要处理的标签（i 为序号，从 0 开始）：
 
 ${itemsText}
 

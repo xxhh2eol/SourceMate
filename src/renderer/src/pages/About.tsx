@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import React from 'react'
-import { Button, Card, Descriptions, message, Typography } from 'antd'
+import { Button, Card, Descriptions, message } from 'antd'
 import { version as antdVersion } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
@@ -48,11 +48,6 @@ export default function About(): React.JSX.Element {
 
   return (
     <div className="page-container">
-      <Typography.Title level={4} className="page-title">
-        {t('about.title')}
-      </Typography.Title>
-      <Typography.Paragraph className="page-desc">{t('about.desc')}</Typography.Paragraph>
-
       <Card
         style={{ maxWidth: 560 }}
         title={t('app.name')}

@@ -1,25 +1,30 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  Badge,
   Button,
+  DatePicker,
+  Dropdown,
   Empty,
   Input,
   Masonry,
   message,
+  Popover,
   Select,
   Segmented,
   Space,
-  Spin,
-  Switch,
-  Typography
+  Spin
 } from 'antd'
 import {
+  AppstoreOutlined,
+  FilterOutlined,
+  MoreOutlined,
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
   SyncOutlined,
-  AppstoreOutlined,
   TableOutlined
 } from '@ant-design/icons'
+import type { Dayjs } from 'dayjs'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import BubbleFilter from '../components/BubbleFilter'
@@ -31,9 +36,26 @@ import { useFilterStore } from '../stores/filterStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useBubbleFilter } from '../hooks/useBubbleFilter'
 import { cleanErrorMessage } from '../utils/error'
+import { analysisStatusOf, type AnalysisStatus } from '../utils/analysisStatus'
 
 type SortKey = 'updatedAt' | 'starCount' | 'name'
 type ViewMode = 'card' | 'table'
+type AnalysisStatusFilter = 'all' | AnalysisStatus
+
+/** 时间范围过滤：本地日期取整天的起止，null 表示不限 */
+function inDateRange(
+  value: string | null | undefined,
+  range: [Dayjs | null, Dayjs | null] | null
+): boolean {
+  if (!range) return true
+  const [start, end] = range
+  if (!value) return false
+  const t = new Date(value).getTime()
+  if (Number.isNaN(t)) return false
+  if (start && t < start.startOf('day').valueOf()) return false
+  if (end && t > end.endOf('day').valueOf()) return false
+  return true
+}
 
 /**
  * Dashboard 首页（设计文档 §8 / 页面图 §2）
@@ -43,7 +65,7 @@ type ViewMode = 'card' | 'table'
 export default function Dashboard(): React.JSX.Element {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const { projects, tags, loading, load, addProject, deleteProject, assignTag, removeTag } =
+  const { projects, tags, tasks, loading, load, addProject, deleteProject, assignTag, removeTag } =
     useProjectStore()
   const keyword = useFilterStore((s) => s.keyword)
   const selectedTagIds = useFilterStore((s) => s.selectedTagIds)
@@ -56,11 +78,21 @@ export default function Dashboard(): React.JSX.Element {
   const [sortKey, setSortKey] = useState<SortKey>('updatedAt')
   const [view, setView] = useState<ViewMode>('card')
   const [addOpen, setAddOpen] = useState(false)
+  const [addedRange, setAddedRange] = useState<[Dayjs | null, Dayjs | null] | null>(null)
+  const [updatedRange, setUpdatedRange] = useState<[Dayjs | null, Dayjs | null] | null>(null)
+  const [analysisFilter, setAnalysisFilter] = useState<AnalysisStatusFilter>('all')
+  const [filterOpen, setFilterOpen] = useState(false)
   // 正在检查更新的项目 id（驱动卡片边框流光动效）
   const [checkingIds, setCheckingIds] = useState<Set<number>>(() => new Set())
 
   useEffect(() => {
     void load()
+  }, [load])
+
+  // 分析任务状态变化时刷新，保证「是否分析过」筛选实时准确
+  useEffect(() => {
+    const unsubscribe = window.api.onTaskProgress(() => void load())
+    return unsubscribe
   }, [load])
 
   // 批量检查时订阅主进程逐项目进度广播，实时点亮/熄灭对应卡片流光
@@ -91,6 +123,13 @@ export default function Dashboard(): React.JSX.Element {
           (p.cnSummary ?? '').toLowerCase().includes(k)
       )
     }
+    if (addedRange) list = list.filter((p) => inDateRange(p.createdAt, addedRange))
+    if (updatedRange) {
+      list = list.filter((p) => inDateRange(p.pushedAt ?? p.updatedAt, updatedRange))
+    }
+    if (analysisFilter !== 'all') {
+      list = list.filter((p) => analysisStatusOf(p, tasks) === analysisFilter)
+    }
     const sorted = [...list]
     if (sortKey === 'starCount') sorted.sort((a, b) => b.starCount - a.starCount)
     else if (sortKey === 'name') sorted.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
@@ -100,7 +139,15 @@ export default function Dashboard(): React.JSX.Element {
         (b.pushedAt ?? b.updatedAt ?? '').localeCompare(a.pushedAt ?? a.updatedAt ?? '')
       )
     return sorted
-  }, [bubble.filteredProjects, keyword, sortKey])
+  }, [
+    bubble.filteredProjects,
+    keyword,
+    sortKey,
+    addedRange,
+    updatedRange,
+    analysisFilter,
+    tasks
+  ])
 
   // 已存在项目（owner/repo 小写集合，添加弹窗预览标记「已存在」）
   const existingProjectKeys = useMemo(
@@ -168,9 +215,7 @@ export default function Dashboard(): React.JSX.Element {
     }
   }
 
-  const [checkingAll, setCheckingAll] = useState(false)
   const checkAllUpdates = async (): Promise<void> => {
-    setCheckingAll(true)
     try {
       const r = await window.api.checkUpdateAll()
       await load()
@@ -191,26 +236,66 @@ export default function Dashboard(): React.JSX.Element {
       }
     } finally {
       setCheckingIds(new Set())
-      setCheckingAll(false)
     }
   }
 
+  const activeFilterCount =
+    (addedRange ? 1 : 0) + (updatedRange ? 1 : 0) + (analysisFilter !== 'all' ? 1 : 0)
+
+  const clearAllFilters = (): void => {
+    setAddedRange(null)
+    setUpdatedRange(null)
+    setAnalysisFilter('all')
+    clearFilters()
+    setFilterOpen(false)
+  }
+
+  const handleMore = ({ key }: { key: string }): void => {
+    if (key === 'checkUpdate') void checkAllUpdates()
+    else if (key === 'refresh') void load()
+    else if (key === 'color') {
+      setProjectColorMode(projectColorMode === 'color' ? 'mono' : 'color')
+    }
+  }
+
+  const filterContent = (
+    <Space direction="vertical" size={8} style={{ minWidth: 300 }}>
+      <DatePicker.RangePicker
+        allowClear
+        placeholder={[t('dashboard.filterAddedStart'), t('dashboard.filterAddedEnd')]}
+        value={addedRange}
+        onChange={(dates) => setAddedRange(dates)}
+      />
+      <DatePicker.RangePicker
+        allowClear
+        placeholder={[t('dashboard.filterUpdatedStart'), t('dashboard.filterUpdatedEnd')]}
+        value={updatedRange}
+        onChange={(dates) => setUpdatedRange(dates)}
+      />
+      <Select<AnalysisStatusFilter>
+        value={analysisFilter}
+        onChange={setAnalysisFilter}
+        style={{ width: '100%' }}
+        options={[
+          { value: 'all', label: t('dashboard.filterStatusAll') },
+          { value: 'analyzed', label: t('dashboard.filterStatusAnalyzed') },
+          { value: 'none', label: t('dashboard.filterStatusNone') },
+          { value: 'analyzing', label: t('dashboard.filterStatusAnalyzing') },
+          { value: 'failed', label: t('dashboard.filterStatusFailed') }
+        ]}
+      />
+      <Button size="small" onClick={clearAllFilters}>
+        {t('dashboard.filterClear')}
+      </Button>
+    </Space>
+  )
+
   return (
-    <div className="page-container">
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-        <div>
-          <Typography.Title level={4} className="page-title">
-            {t('dashboard.title')}
-          </Typography.Title>
-          <Typography.Paragraph className="page-desc">
-            {t('dashboard.desc')} · {t('dashboard.projectCount', { count: projects.length })}
-          </Typography.Paragraph>
-        </div>
-        <Space>
-          <Button icon={<PlusOutlined />} type="primary" onClick={() => setAddOpen(true)}>
-            {t('dashboard.addProject')}
-          </Button>
-        </Space>{' '}
+    <div className="page-container" style={{ padding: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 16 }}>
+        <Button icon={<PlusOutlined />} type="primary" onClick={() => setAddOpen(true)}>
+          {t('dashboard.addProject')}
+        </Button>
       </div>
 
       {projects.length > 0 && (
@@ -223,7 +308,7 @@ export default function Dashboard(): React.JSX.Element {
             bubble={bubble}
           />
 
-          <Space style={{ marginBottom: 16 }}>
+          <Space wrap style={{ marginBottom: 12 }}>
             <Segmented<ViewMode>
               value={view}
               onChange={setView}
@@ -244,37 +329,50 @@ export default function Dashboard(): React.JSX.Element {
               allowClear
               prefix={<SearchOutlined />}
               placeholder={t('dashboard.searchPlaceholder')}
-              style={{ width: 260 }}
+              style={{ width: 200 }}
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
             />
             <Select<SortKey>
               value={sortKey}
               onChange={setSortKey}
-              style={{ width: 140 }}
+              style={{ width: 120 }}
               options={[
                 { value: 'updatedAt', label: t('dashboard.sortUpdated') },
                 { value: 'starCount', label: t('dashboard.sortStar') },
                 { value: 'name', label: t('dashboard.sortName') }
               ]}
             />
-            <Button
-              icon={<ReloadOutlined />}
-              loading={checkingAll}
-              onClick={() => void checkAllUpdates()}
+            <Popover
+              open={filterOpen}
+              onOpenChange={setFilterOpen}
+              trigger="click"
+              placement="bottomLeft"
+              content={filterContent}
             >
-              {t('common.checkUpdate')}
-            </Button>
-            <Button icon={<SyncOutlined />} onClick={() => void load()}>
-              {t('common.refresh')}
-            </Button>
-            {/* 卡片/表格行配色模式：彩色（按项目名淡色相）| 黑白 */}
-            <Switch
-              checked={projectColorMode === 'color'}
-              onChange={(checked) => setProjectColorMode(checked ? 'color' : 'mono')}
-              checkedChildren={t('dashboard.colorMode')}
-              unCheckedChildren={t('dashboard.monoMode')}
-            />
+              <Badge count={activeFilterCount} size="small">
+                <Button icon={<FilterOutlined />}>{t('dashboard.filter')}</Button>
+              </Badge>
+            </Popover>
+            <Dropdown
+              menu={{
+                items: [
+                  { key: 'checkUpdate', label: t('common.checkUpdate'), icon: <ReloadOutlined /> },
+                  { key: 'refresh', label: t('common.refresh'), icon: <SyncOutlined /> },
+                  { type: 'divider' },
+                  {
+                    key: 'color',
+                    label:
+                      projectColorMode === 'color'
+                        ? t('dashboard.switchToMono')
+                        : t('dashboard.switchToColor')
+                  }
+                ],
+                onClick: handleMore
+              }}
+            >
+              <Button icon={<MoreOutlined />} />
+            </Dropdown>
           </Space>
         </>
       )}
@@ -297,6 +395,7 @@ export default function Dashboard(): React.JSX.Element {
         <ProjectTableView
           projects={visibleProjects}
           onOpen={(id) => navigate(`/repository/${id}/summary`)}
+          scrollY="calc(100vh - 280px)"
           onDelete={async (id) => {
             await deleteProject(id)
             clearFilters()

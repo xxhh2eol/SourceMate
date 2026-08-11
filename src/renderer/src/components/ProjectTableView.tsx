@@ -23,13 +23,16 @@ export default function ProjectTableView({
   projects,
   onOpen,
   onDelete,
-  showAi = false
+  showAi = false,
+  scrollY
 }: {
   projects: ProjectRow[]
   onOpen: (id: number) => void
   /** 提供时表格追加「删除」操作列（Popconfirm 确认）；不提供则不显示 */
   onDelete?: (id: number) => Promise<void>
   showAi?: boolean
+  /** 表格内容区固定高度（如 calc(100vh - xx)），让表格内部滚动、充分利用剩余空间 */
+  scrollY?: number | string
 }): React.JSX.Element {
   const { t } = useTranslation()
   // 卡片/表格行配色模式（彩色 = 按项目名淡色相；黑白 = 默认白底）
@@ -173,6 +176,7 @@ export default function ProjectTableView({
         size: 'small'
       }}
       size="small"
+      scroll={scrollY !== undefined ? { y: scrollY } : undefined}
       onRow={(p) => ({
         style: {
           cursor: 'pointer',

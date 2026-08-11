@@ -363,6 +363,7 @@ function ReadmeTab({
 
   /** AI 翻译英文 README 为中文（仅无中文版时提供） */
   const startTranslate = async (): Promise<void> => {
+    if (translating) return
     setTranslating(true)
     try {
       const r = await window.api.translateReadme(project.id)
@@ -423,16 +424,25 @@ function ReadmeTab({
         <Typography.Text type="secondary">{t('repository.readmeSource')}</Typography.Text>
         {/* AI 翻译：无中文版 + 有英文版时提供（专注中文） */}
         {!hasZhContent && Boolean(project.readmeEn) && (
-          <Tooltip title={t('repository.readmeTranslateTip')}>
+          <Tooltip
+            title={
+              translating
+                ? t('repository.readmeTranslating')
+                : t('repository.readmeTranslateTip')
+            }
+          >
             <Button
               size="small"
               icon={<TranslationOutlined />}
               loading={translating}
+              disabled={translating}
               onClick={() => void startTranslate()}
             >
-              {project.readmeZhAi
-                ? t('repository.readmeRetranslate')
-                : t('repository.readmeTranslate')}
+              {translating
+                ? t('repository.readmeTranslating')
+                : project.readmeZhAi
+                  ? t('repository.readmeRetranslate')
+                  : t('repository.readmeTranslate')}
             </Button>
           </Tooltip>
         )}
@@ -671,7 +681,7 @@ function ReleasesTab({ project }: { project: ProjectWithTags }): React.JSX.Eleme
   )
 }
 
-/** 历史版本记录：每版本表头「分析」按钮，只 AI 分析该版本附带的文件（名称 / SHA-256 / 下载链接 / 平台说明） */
+/** 历史版本记录：每版本表头「分析」按钮，本地规则优先生成文件说明，AI 兜底补全 SHA-256 / 平台说明 */
 function VersionsTab({ project }: { project: ProjectWithTags }): React.JSX.Element {
   const { t } = useTranslation()
   const [analyses, setAnalyses] = useState<ReleaseAnalysisInfo[] | null>(null)

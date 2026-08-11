@@ -3,19 +3,14 @@
  * 判断 unknownTags 应进入候选池、升级、合并还是拒绝；AI 只给建议，正式标签库的人工确认在 v3。
  */
 
-import type { TagType, UnknownTag } from './tagNormalizePrompt'
+import type { UnknownTag } from './tagNormalizePrompt'
 
 export type CandidateAction = 'create_candidate' | 'promote_to_official' | 'merge' | 'reject'
 
+/** 单条候选判断（按未知标签列表序号 i 引用原始标签） */
 export interface CandidateDecision {
-  tagName: string
-  /** 中文名（未知标签若有中文名原样带回，没有则空字符串） */
-  nameCn?: string | null
-  /** 标签类型（对应输入未知标签的类型，AI 原样带回） */
-  tagType: TagType
+  i: number
   action: CandidateAction
-  /** action 为 merge 时的合并目标（否则为空字符串） */
-  mergeTarget: string
   reason: string
   confidence: number
 }
@@ -71,11 +66,8 @@ export const TAG_CANDIDATE_SYSTEM_PROMPT = `你是一名开源分类系统审查
 {
   "decisions": [
     {
-      "tagName": "未知标签的原名（不得改写或翻译，原样带回）",
-      "nameCn": "中文名（未知标签原本带中文名则原样带回，否则空字符串）",
-      "tagType": "domain | technology | capability | scenario | targetUser（原样带回输入中该标签的类型）",
+      "i": 0,
       "action": "create_candidate | promote_to_official | merge | reject",
-      "mergeTarget": "如果 action 是 merge，填写建议合并到的已有标签；否则为空字符串",
       "reason": "判断理由",
       "confidence": 0.0
     }
@@ -85,10 +77,11 @@ export const TAG_CANDIDATE_SYSTEM_PROMPT = `你是一名开源分类系统审查
 输出要求：
 
 1. confidence 必须是 0 到 1 之间的小数。
-2. action 必须从 create_candidate、promote_to_official、merge、reject 中选择一个。
-3. 如果 action 不是 merge，mergeTarget 必须为空字符串。
+2. i 是「未知标签列表」中的序号，从 0 开始，必须与输入列表一一对应；每个未知标签必须且只能有一条 decision，不能遗漏，也不要输出不存在的序号。
+3. action 必须从 create_candidate、promote_to_official、merge、reject 中选择一个。
 4. 如果证据不足，默认使用 create_candidate 或 reject。
-5. 不要输出 JSON 以外的任何内容，不要 Markdown 代码块。`
+5. 不要输出 tagName、nameCn、tagType、mergeTarget 等已在输入中提供的字段；merge 时无需提供合并目标。
+6. 不要输出 JSON 以外的任何内容，不要 Markdown 代码块。`
 
 export function buildTagCandidateUserPrompt(
   existingTags: string[],
@@ -101,7 +94,7 @@ export function buildTagCandidateUserPrompt(
   const existingText = existingTags.length > 0 ? existingTags.join('\n') : '（暂无）'
   const rejectedText = rejectedTags.length > 0 ? rejectedTags.join('\n') : '（无）'
   const unknownText = unknownTags
-    .map((u) => `- ${u.rawTag}（类型：${u.tagType}）`)
+    .map((u, idx) => `- ${idx}. ${u.rawTag}（类型：${u.tagType}）`)
     .join('\n')
   return `请审查以下未知标签，并判断它们是否应该进入标签系统。
 
@@ -113,7 +106,7 @@ ${existingText}
 
 ${rejectedText}
 
-未知标签列表：
+未知标签列表（i 为序号，从 0 开始）：
 
 ${unknownText}
 

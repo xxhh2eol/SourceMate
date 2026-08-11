@@ -32,6 +32,7 @@ import { useTranslation } from 'react-i18next'
 import type { CandidateTagView, ProjectWithTags, TagDimension, TaskItem } from '@shared/types'
 import { formatRelativeTime } from '../utils/format'
 import { cleanErrorMessage } from '../utils/error'
+import { analysisStatusOf, type AnalysisStatus } from '../utils/analysisStatus'
 
 const STATUS_META: Record<TaskItem['status'], { color: string }> = {
   pending: { color: 'default' },
@@ -111,17 +112,6 @@ interface ProjectRow extends ProjectWithTags {
 /** 「上次分析」时间：优先 AI 摘要生成时间（旧功能），否则用最近完成的分析任务时间 */
 function lastAnalyzedAt(p: ProjectRow): string | null {
   return p.summary?.createdAt ?? p.lastSyncAt
-}
-
-/** AI 分析状态（基于 tag_analysis 任务 + 一句话描述判定） */
-type AnalysisStatus = 'analyzing' | 'analyzed' | 'failed' | 'none'
-
-function analysisStatusOf(p: ProjectRow, tasks: TaskItem[]): AnalysisStatus {
-  const ts = tasks.filter((x) => x.projectId === p.id && x.type === 'tag_analysis')
-  if (ts.some((x) => x.status === 'pending' || x.status === 'running')) return 'analyzing'
-  if (ts.some((x) => x.status === 'done') || !!p.cnSummary) return 'analyzed'
-  if (ts.some((x) => x.status === 'failed')) return 'failed'
-  return 'none'
 }
 
 const ANALYSIS_STATUS_META: Record<AnalysisStatus, { color: string; labelKey: string }> = {
@@ -277,9 +267,6 @@ export default function AICenter(): React.JSX.Element {
       ),
     [tasks]
   )
-
-  // 已同步 README 的项目数（AI 摘要已暂停，任务语义为 README 拉取 + 翻译）
-  const syncedCount = useMemo(() => projects.filter((p) => p.readmeCache).length, [projects])
 
   const toggleSelected = (id: number): void => {
     setSelectedIds((prev) => {
@@ -475,7 +462,11 @@ export default function AICenter(): React.JSX.Element {
           width: taskColWidths.projectName ?? 180,
           onResize: (w: number) => setTaskColWidths((s) => ({ ...s, projectName: w }))
         }) as React.HTMLAttributes<HTMLTableCellElement>,
-      render: (name: string | undefined, r) => name ?? `#${r.projectId}`
+      render: (name: string | undefined, r) => (
+        <Typography.Link onClick={() => navigate(`/repository/${r.projectId}`)}>
+          {name ?? `#${r.projectId}`}
+        </Typography.Link>
+      )
     },
     {
       title: t('aiCenter.colTask'),
@@ -591,20 +582,6 @@ export default function AICenter(): React.JSX.Element {
 
   return (
     <div className="page-container">
-      <Typography.Title level={4} className="page-title">
-        {t('aiCenter.title')}
-      </Typography.Title>
-      <Typography.Paragraph className="page-desc">
-        {t('aiCenter.desc', {
-          total: stats.total,
-          done: stats.done,
-          failed: stats.failed,
-          active: stats.active
-        })}
-        {' · '}
-        {t('aiCenter.projectStats', { total: projects.length, synced: syncedCount })}
-      </Typography.Paragraph>
-
       <Tabs
         activeKey={activeTab}
         onChange={setActiveTab}

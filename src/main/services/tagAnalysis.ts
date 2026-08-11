@@ -19,6 +19,7 @@ import {
 import { msg } from '../msg'
 import type { ProjectWithTags, TagDimension, TagInfo } from '../../shared/types'
 import { TAG_TYPE_VOCABULARY } from '../../shared/types'
+import { truncateReadme } from './readmeTruncate'
 import {
   TAG_ANALYZE_SYSTEM_PROMPT,
   TAG_DOMAIN_VOCABULARY,
@@ -39,8 +40,7 @@ import {
 import {
   TAG_CANDIDATE_SYSTEM_PROMPT,
   buildTagCandidateUserPrompt,
-  type CandidateDecision,
-  type TagCandidateResult
+  type CandidateAction
 } from './prompts/tagCandidatePrompt'
 
 /** 标签类型 → 维度映射（环节一 tagType 与 schema dimension 对齐；scene 走 scenario 槽位归入 purpose） */
@@ -180,35 +180,6 @@ function collectRawTags(result: TagAnalyzeResult): TagNormalizeItem[] {
   return items
 }
 
-/**
- * README 截断（设计文档 §6.1）：前 3000 字符 + 含 Install/Usage/Features/简介 等关键段，总长 ≤ 8000。
- * 关键段按标题行识别，取到下一个标题为止，超出预算即停。
- */
-function truncateReadme(readme: string, max = 8000): string {
-  if (readme.length <= max) return readme
-  const head = readme.slice(0, 3000)
-  const tail = readme.slice(3000)
-  const KEY_SECTION = /^\s*#{1,6}\s*(?:Install(?:ation)?|Usage|Features|Quick Start|Getting Started|简介|安装|使用|特性|快速开始)\b/i
-  const HEADING = /^\s*#{1,6}\s/
-  const picked: string[] = []
-  let inSection = false
-  const budget = max - head.length
-  for (const line of tail.split('\n')) {
-    if (HEADING.test(line)) inSection = false
-    if (inSection) {
-      const added = line.length + 1
-      if (picked.join('\n').length + added > budget) break
-      picked.push(line)
-      continue
-    }
-    if (KEY_SECTION.test(line)) {
-      inSection = true
-      picked.push(line)
-    }
-  }
-  return picked.length > 0 ? `${head}\n\n【关键段落】\n${picked.join('\n')}` : head
-}
-
 async function analyzeProject(project: ProjectWithTags): Promise<TagAnalyzeResult> {
   const config = getModelConfig()
   if (!hasModelConfig(config)) {
@@ -247,31 +218,60 @@ async function analyzeProject(project: ProjectWithTags): Promise<TagAnalyzeResul
 
 // ---- 环节二：归一化匹配（规则优先 + AI 语义匹配兜底） ----
 
-function normalizeNormalizeResult(raw: unknown): { matchedTags: NormalizedTag[]; unknownTags: UnknownTag[] } {
+interface NormalizeMatchDraft {
+  index?: number
+  rawTag?: string
+  normalizedTag?: string
+  matchedExistingTag?: string
+  confidence: number
+  reason: string
+}
+
+interface NormalizeUnknownDraft {
+  index?: number
+  rawTag?: string
+  suggestedTagName?: string
+  confidence: number
+  reason: string
+}
+
+function toIndex(v: unknown): number | undefined {
+  if (typeof v === 'number' && Number.isInteger(v) && v >= 0) return v
+  if (typeof v === 'string' && /^\d+$/.test(v.trim())) return Number(v.trim())
+  return undefined
+}
+
+function normalizeNormalizeResult(raw: unknown): {
+  matches: NormalizeMatchDraft[]
+  unknowns: NormalizeUnknownDraft[]
+} {
   const j = (raw ?? {}) as Record<string, unknown>
   const arr = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : [])
-  return {
-    matchedTags: arr<Record<string, unknown>>(j.matchedTags)
-      .map((m) => ({
-        rawTag: String(m.rawTag ?? ''),
-        normalizedTag: String(m.normalizedTag ?? m.rawTag ?? ''),
-        matchedExistingTag: String(m.matchedExistingTag ?? m.normalizedTag ?? ''),
-        tagType: String(m.tagType ?? 'capability') as TagType,
-        confidence: typeof m.confidence === 'number' ? m.confidence : 0,
-        reason: String(m.reason ?? '')
-      }))
-      .filter((m) => m.rawTag),
-    unknownTags: arr<Record<string, unknown>>(j.unknownTags)
-      .map((u) => ({
-        rawTag: String(u.rawTag ?? ''),
-        suggestedTagName: String(u.suggestedTagName ?? u.rawTag ?? ''),
-        nameCn: (typeof u.name_cn === 'string' && u.name_cn.trim()) || null,
-        tagType: String(u.tagType ?? 'capability') as TagType,
-        confidence: typeof u.confidence === 'number' ? u.confidence : 0,
-        reason: String(u.reason ?? '')
-      }))
-      .filter((u) => u.rawTag)
-  }
+  const matches = arr<Record<string, unknown>>(j.matches ?? j.matchedTags)
+    .map((m) => ({
+      index: toIndex(m.i),
+      rawTag: typeof m.rawTag === 'string' ? m.rawTag : '',
+      normalizedTag: typeof m.normalizedTag === 'string' ? m.normalizedTag : '',
+      matchedExistingTag:
+        typeof m.matchedExistingTag === 'string'
+          ? m.matchedExistingTag
+          : typeof m.normalizedTag === 'string'
+            ? m.normalizedTag
+            : '',
+      confidence: typeof m.confidence === 'number' ? m.confidence : 0,
+      reason: String(m.reason ?? '')
+    }))
+    .filter((m) => m.index !== undefined || m.rawTag)
+  const unknowns = arr<Record<string, unknown>>(j.unknowns ?? j.unknownTags)
+    .map((u) => ({
+      index: toIndex(u.i),
+      rawTag: typeof u.rawTag === 'string' ? u.rawTag : '',
+      suggestedTagName: typeof u.suggestedTagName === 'string' ? u.suggestedTagName : '',
+      confidence: typeof u.confidence === 'number' ? u.confidence : 0,
+      reason: String(u.reason ?? '')
+    }))
+    .filter((u) => u.index !== undefined || u.rawTag)
+  return { matches, unknowns }
 }
 
 /**
@@ -326,47 +326,80 @@ async function normalizeAndMatch(
   const aiResult = normalizeNormalizeResult(extractJson(content))
   // AI 的 matchedExistingTag 可能命中中文名/变体，统一解析回库中规范名；解析失败降级为 unknown
   const aiMatched: NormalizedTag[] = []
-  const nameCnByRaw = new Map(unresolved.map((i) => [i.rawTag, i.nameCn]))
-  for (const m of aiResult.matchedTags) {
+  for (const m of aiResult.matches) {
+    const item =
+      m.index !== undefined
+        ? unresolved[m.index]
+        : unresolved.find((i) => i.rawTag === m.rawTag)
+    if (!item) continue
     const hit =
-      tagIndex.get(normalizeTagName(m.matchedExistingTag)) ?? tagIndex.get(normalizeTagName(m.normalizedTag))
+      tagIndex.get(normalizeTagName(m.matchedExistingTag ?? '')) ??
+      tagIndex.get(normalizeTagName(m.normalizedTag ?? ''))
     if (hit) {
       aiMatched.push({
-        ...m,
+        rawTag: item.rawTag,
         normalizedTag: hit.name,
         matchedExistingTag: hit.name,
-        nameCn: nameCnByRaw.get(m.rawTag) ?? null
+        nameCn: item.nameCn ?? null,
+        tagType: item.tagType,
+        confidence: m.confidence,
+        reason: m.reason
       })
     }
   }
   // unknown 的中文名：优先 AI 输出，否则取环节一透传（unresolved 同 rawTag 的 nameCn）
-  const aiUnknown = aiResult.unknownTags.map((u) => ({
-    ...u,
-    nameCn: u.nameCn ?? nameCnByRaw.get(u.rawTag) ?? null
-  }))
+  const aiUnknown: UnknownTag[] = []
+  for (const u of aiResult.unknowns) {
+    const item =
+      u.index !== undefined
+        ? unresolved[u.index]
+        : unresolved.find((i) => i.rawTag === u.rawTag)
+    if (!item) continue
+    aiUnknown.push({
+      rawTag: item.rawTag,
+      suggestedTagName: u.suggestedTagName || item.rawTag,
+      nameCn: item.nameCn ?? null,
+      tagType: item.tagType,
+      confidence: u.confidence,
+      reason: u.reason
+    })
+  }
   return { matched: [...ruleMatched, ...aiMatched], unknown: aiUnknown }
 }
 
 // ---- 环节三：候选判断 ----
 
-function normalizeCandidateResult(raw: unknown): TagCandidateResult {
+interface CandidateDecisionDraft {
+  index?: number
+  tagName?: string
+  nameCn?: string | null
+  action: CandidateAction
+  reason: string
+  confidence: number
+}
+
+function normalizeCandidateResult(raw: unknown): CandidateDecisionDraft[] {
   const j = (raw ?? {}) as Record<string, unknown>
   const arr = Array.isArray(j.decisions) ? (j.decisions as Record<string, unknown>[]) : []
-  const decisions: CandidateDecision[] = []
+  const decisions: CandidateDecisionDraft[] = []
   for (const d of arr) {
     const action = String(d.action ?? '')
     if (!['create_candidate', 'promote_to_official', 'merge', 'reject'].includes(action)) continue
+    const index = toIndex(d.i)
+    const tagName = typeof d.tagName === 'string' ? d.tagName : ''
+    if (index === undefined && !tagName) continue
+    const nameCnRaw =
+      typeof d.nameCn === 'string' ? d.nameCn : typeof d.name_cn === 'string' ? d.name_cn : ''
     decisions.push({
-      tagName: String(d.tagName ?? ''),
-      nameCn: (typeof d.name_cn === 'string' && d.name_cn.trim()) || null,
-      tagType: String(d.tagType ?? 'capability') as TagType,
-      action: action as CandidateDecision['action'],
-      mergeTarget: String(d.mergeTarget ?? ''),
+      index,
+      tagName,
+      nameCn: nameCnRaw.trim() || null,
+      action: action as CandidateAction,
       reason: String(d.reason ?? ''),
       confidence: typeof d.confidence === 'number' ? d.confidence : 0
     })
   }
-  return { decisions }
+  return decisions
 }
 
 async function judgeCandidates(
@@ -390,7 +423,7 @@ async function judgeCandidates(
     120_000,
     0
   )
-  const { decisions } = normalizeCandidateResult(extractJson(content))
+  const decisions = normalizeCandidateResult(extractJson(content))
 
   // 候选标签的中文名：优先 AI 输出，否则取环节一透传的 nameCn（按规范名关联）
   const nameCnByTag = new Map<string, string | null>()
@@ -407,7 +440,12 @@ async function judgeCandidates(
   let merged = 0
   let rejected = 0
   for (const d of decisions) {
-    const name = normalizeTagName(d.tagName)
+    const u =
+      d.index !== undefined
+        ? unknownTags[d.index]
+        : rawTagByNorm.get(normalizeTagName(d.tagName ?? ''))
+    if (!u) continue
+    const name = normalizeTagName(d.tagName || u.rawTag)
     if (!name) continue
     // 黑名单兜底：被人工拒绝过的标签不复活（即使 AI 忽略提示仍推荐）
     if (rejectedNames.has(name)) {
@@ -415,9 +453,8 @@ async function judgeCandidates(
       continue
     }
     if (d.action === 'create_candidate' || d.action === 'promote_to_official') {
-      const dimension = TAG_TYPE_DIMENSION[d.tagType] ?? 'capability'
+      const dimension = TAG_TYPE_DIMENSION[u.tagType] ?? 'capability'
       // 中文原始词兜底：环节三若返回英文改写（如 application），回退为原始中文词（应用）
-      const u = rawTagByNorm.get(name)
       const finalName = u && hasChinese(u.rawTag) ? normalizeTagName(u.rawTag) : name
       const nameCn = d.nameCn ?? u?.nameCn ?? nameCnByTag.get(name) ?? null
       createCandidateTag(finalName, dimension, nameCn)

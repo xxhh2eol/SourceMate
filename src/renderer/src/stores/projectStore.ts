@@ -1,9 +1,10 @@
 import { create } from 'zustand'
-import type { ProjectWithTags, TagDimension, TagWithCount } from '@shared/types'
+import type { ProjectWithTags, TagDimension, TagWithCount, TaskItem } from '@shared/types'
 
 interface ProjectState {
   projects: ProjectWithTags[]
   tags: TagWithCount[]
+  tasks: TaskItem[]
   loading: boolean
   load: () => Promise<void>
   addProject: (url: string) => Promise<{ project: ProjectWithTags; duplicate: boolean; metaError: string | null }>
@@ -16,13 +17,18 @@ interface ProjectState {
 export const useProjectStore = create<ProjectState>()((set, get) => ({
   projects: [],
   tags: [],
+  tasks: [],
   loading: false,
 
   load: async () => {
     set({ loading: true })
     try {
-      const [projects, tags] = await Promise.all([window.api.listProjects(), window.api.listTags()])
-      set({ projects, tags })
+      const [projects, tags, tasks] = await Promise.all([
+        window.api.listProjects(),
+        window.api.listTags(),
+        window.api.listTasks()
+      ])
+      set({ projects, tags, tasks })
     } finally {
       set({ loading: false })
     }

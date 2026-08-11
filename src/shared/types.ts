@@ -160,7 +160,7 @@ export interface ReleaseFileInfo {
   sha256: string | null
   /** 下载链接（API browser_download_url） */
   url: string
-  /** 文件说明（AI 生成，如「Linux x64 版本」「Windows arm64 版本」） */
+  /** 文件说明（本地命名规则优先，AI 兜底，如「Linux x64 版本」「Windows arm64 版本」） */
   note: string
 }
 

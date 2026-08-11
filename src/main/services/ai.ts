@@ -4,6 +4,8 @@ import { decryptSecret, encryptSecret } from './secret'
 import { msg } from '../msg'
 import type { ProjectWithTags, ReleaseFileInfo } from '../../shared/types'
 import type { ReleaseData } from './github'
+import { inferReleaseFileNote } from './releaseFileNote'
+import { truncateReadme } from './readmeTruncate'
 
 /**
  * AI 服务（设计文档 §6）
@@ -321,7 +323,11 @@ export async function analyzeReadme(
     )
   }
 
-  const readme = (project.readmeCache ?? project.readmeEn ?? project.readmeZh ?? '').slice(0, 8000)
+  // 与标签分析共用关键段落截断：README 很长时避免把无关长尾全量发给 AI
+  const readme = truncateReadme(
+    project.readmeCache ?? project.readmeEn ?? project.readmeZh ?? '',
+    8000
+  )
   const appLanguage = language === 'zh' ? 'zh-CN' : 'en-US'
   const langRule = LANGUAGE_RULES[appLanguage] ?? LANGUAGE_RULES['zh-CN']
   const userPrompt = `项目名称：${project.name}
@@ -361,8 +367,13 @@ function stripCodeFence(text: string): string {
   return m ? m[1].trim() : trimmed
 }
 
-/** 将英文 README 翻译为简体中文（保留 Markdown 结构），供无中文版仓库的中文用户阅读 */
-export async function translateReadme(
+/** 同一项目同时只允许一次翻译请求，避免手动按钮、后台队列、IPC 入口并发重复调 AI */
+const readmeTranslateInFlight = new Map<
+  number,
+  Promise<{ text: string; tokens: number; model: string }>
+>()
+
+async function doTranslateReadme(
   project: ProjectWithTags
 ): Promise<{ text: string; tokens: number; model: string }> {
   const config = getModelConfig()
@@ -391,19 +402,39 @@ export async function translateReadme(
   return { text: stripCodeFence(content), tokens, model: config.model }
 }
 
-/** 历史版本记录分析：AI 依据发布说明为每个版本的文件补全 SHA-256 并生成平台说明，同时翻译版本说明为中文 */
+/** 将英文 README 翻译为简体中文（保留 Markdown 结构），供无中文版仓库的中文用户阅读 */
+export function translateReadme(
+  project: ProjectWithTags
+): Promise<{ text: string; tokens: number; model: string }> {
+  const existing = readmeTranslateInFlight.get(project.id)
+  if (existing) return existing
+
+  const task = doTranslateReadme(project)
+  readmeTranslateInFlight.set(project.id, task)
+  void task.finally(() => {
+    if (readmeTranslateInFlight.get(project.id) === task) {
+      readmeTranslateInFlight.delete(project.id)
+    }
+  })
+  return task
+}
+
+/** 历史版本记录分析：AI 翻译版本说明；仅对本地规则无法推断说明或 API 缺少 SHA-256 的文件做兜底 */
 const RELEASE_ANALYSIS_SYSTEM = `你是软件发布信息整理助手。下面是某个 GitHub 项目各版本（Release）的发布信息 JSON 数组。
 
 每个版本包含：
 - version：版本号
 - description：发布说明（通常为英文，可能包含文件校验和）
-- files：该版本附带的文件列表，每项含 name（文件名）、url（下载地址）、sha256（可能为 null）
+- files：需要你补充的文件列表；每项只包含需要处理的字段：
+  - name：文件名
+  - sha256：值为 null 表示该文件缺少 SHA-256，需要你尝试从 description 中提取
+  - note：值为 null 表示该文件没有现成说明，需要你根据文件名与发布说明推断平台说明
 
 任务：
 1. 将每个版本的发布说明 description 翻译为简体中文（若原文已是简体中文则原样保留），存入 descriptionZh；翻译要完整覆盖原文要点，保留 Markdown 结构。
-2. 对每个文件：若 sha256 为 null，尽力从该版本的发布说明中提取其 SHA-256（通常形如 "SHA256: xxxx"、"sha256sum xxxx"、"xxxx  <文件名>"）；确实找不到则为 null。
-3. 为每个文件生成一行简短的中文说明 note：说明这是哪个平台的版本（如 Linux x64 版本、Windows x64 版本、Windows arm64 版本、macOS arm64 版本、源代码压缩包），依据文件名、扩展名与发布说明推断；文件名无法明确判断平台的写"安装包"或"附件"，严禁臆造文件名不支持的平台。
-4. 输出必须包含输入中的所有版本与所有文件，顺序不变。
+2. 对 sha256 为 null 的文件，尽力从该版本的发布说明中提取其 SHA-256（通常形如 "SHA256: xxxx"、"sha256sum xxxx"、"xxxx  <文件名>"）；确实找不到则为 null。
+3. 对 note 为 null 的文件，生成一行简短的中文说明 note：说明这是哪个平台的版本（如 Linux x64 版本、Windows x64 版本、Windows arm64 版本、macOS arm64 版本、源代码压缩包），依据文件名、扩展名与发布说明推断；文件名无法明确判断平台的写"安装包"或"附件"，严禁臆造文件名不支持的平台。
+4. 输出必须包含输入中的所有版本，顺序不变，且每个版本都必须输出 version 与 descriptionZh；files 只输出需要补全的文件项（sha256 或 note 原本为 null 的文件），不需要补全的文件不要输出；没有需要补全的文件时 files 可为空数组或省略。
 
 只输出一个合法的 JSON 数组，不要 markdown 代码块、不要任何其他文字：
 [{"version": "...", "descriptionZh": "...", "files": [{"name": "...", "sha256": "..."或null, "note": "..."}]}]`
@@ -449,7 +480,7 @@ function extractJsonArray(text: string): unknown {
 }
 
 /**
- * AI 分析版本发布记录：翻译版本说明为中文，并为每个版本的文件补充 sha256（API 缺失时）与中文平台说明。
+ * AI 分析版本发布记录：翻译版本说明为中文；本地规则无法推断说明或 API 缺少 SHA-256 的文件才交给 AI。
  * 返回与 releases 对应的版本列表（仅含至少有一个文件的版本）。
  */
 export async function analyzeReleaseVersions(
@@ -469,17 +500,20 @@ export async function analyzeReleaseVersions(
     )
   }
 
-  // 构造输入：只分析带文件的版本；发布说明截断控制体量，文件上限 15 个/版本
+  // 构造输入：只分析带文件的版本；发布说明截断控制体量，文件上限 15 个/版本。
+  // url 由 API 回填、已知 sha256 无需模型处理，均不发送；
+  // 本地规则能推断说明的文件也不发送，进一步减少输入与输出 token。
   const input = releases
     .filter((r) => r.assets.length > 0)
     .map((r) => ({
       version: r.tagName,
       description: (r.body ?? '').slice(0, 1500),
-      files: r.assets.slice(0, 15).map((a) => ({
-        name: a.name,
-        url: a.downloadUrl,
-        sha256: a.sha256
-      }))
+      files: r.assets.slice(0, 15).flatMap((a) => {
+        const entry: Record<string, string | null> = { name: a.name }
+        if (!a.sha256) entry.sha256 = null
+        if (!inferReleaseFileNote(a.name)) entry.note = null
+        return Object.keys(entry).length > 1 ? [entry] : []
+      })
     }))
   if (input.length === 0) {
     throw new Error(
@@ -509,39 +543,50 @@ export async function analyzeReleaseVersions(
     if (Array.isArray(raw)) merged.push(...raw)
   }
 
-  // 以 API 数据为准合并 AI 结果：url 用 API 的；sha256 优先 API digest
-  const apiVersionMap = new Map(releases.map((r) => [r.tagName, r]))
-  const parsed = merged
-  const result = parsed
-    .filter(
-      (v): v is { version?: unknown; files?: unknown; descriptionZh?: unknown } =>
-        !!v && typeof v === 'object' && 'version' in (v as object)
-    )
-    .map((v) => {
-      const release = apiVersionMap.get(String(v.version))
-      const files = Array.isArray(v.files)
-        ? v.files
-            .filter(
-              (f): f is { name?: unknown; sha256?: unknown; note?: unknown } =>
-                !!f && typeof f === 'object'
-            )
-            .map((f) => {
-              const apiAsset = release?.assets.find((a) => a.name === f.name)
-              return {
-                name: String(f.name ?? 'unknown'),
-                sha256: apiAsset?.sha256 ?? (f.sha256 ? String(f.sha256) : null),
-                url: apiAsset?.downloadUrl ?? '',
-                note: String(f.note ?? '').trim()
-              }
-            })
-        : []
+  // 以 API 数据为准合并 AI 结果：url 用 API 的；sha256 优先 API digest；
+  // note 优先本地命名规则，规则无法识别时回退 AI 生成
+  const aiByVersion = new Map<string, Record<string, unknown>>()
+  for (const item of merged) {
+    if (
+      item &&
+      typeof item === 'object' &&
+      typeof (item as Record<string, unknown>).version === 'string'
+    ) {
+      const rec = item as Record<string, unknown>
+      aiByVersion.set(String(rec.version), rec)
+    }
+  }
+
+  const result: Array<{
+    version: string
+    descriptionZh: string | null
+    files: ReleaseFileInfo[]
+  }> = []
+  for (const release of releases) {
+    if (release.assets.length === 0) continue
+    const ai = aiByVersion.get(release.tagName)
+    if (!ai) continue
+    const aiFiles = Array.isArray(ai.files)
+      ? ai.files.filter(
+          (f): f is Record<string, unknown> => !!f && typeof f === 'object'
+        )
+      : []
+    const files: ReleaseFileInfo[] = release.assets.slice(0, 15).map((a) => {
+      const aiFile = aiFiles.find((f) => String(f.name) === a.name)
+      const localNote = inferReleaseFileNote(a.name)
       return {
-        version: String(v.version),
-        descriptionZh: v.descriptionZh ? String(v.descriptionZh).trim() : null,
-        files
+        name: a.name,
+        sha256: a.sha256 ?? (aiFile?.sha256 ? String(aiFile.sha256) : null),
+        url: a.downloadUrl,
+        note: localNote ?? (aiFile?.note ? String(aiFile.note).trim() : '')
       }
     })
-    .filter((v) => v.files.length > 0)
+    result.push({
+      version: release.tagName,
+      descriptionZh: ai.descriptionZh ? String(ai.descriptionZh).trim() : null,
+      files
+    })
+  }
 
   return { result, tokens, model: config.model }
 }
