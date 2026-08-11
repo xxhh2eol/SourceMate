@@ -15,7 +15,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "db:generate": "drizzle-kit generate",
-    "dist": "npm run build && electron-builder --win",
+    "dist": "npm run build && electron-builder --win --publish always",
     "rebuild": "electron-builder install-app-deps",
     "postinstall": "electron-builder install-app-deps && node scripts/patch-dev-icon.mjs",
     "dist:linux": "npm run build && electron-builder --linux",
