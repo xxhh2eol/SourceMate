@@ -12,12 +12,14 @@ import {
   Select,
   Segmented,
   Space,
-  Spin
+  Spin,
+  theme
 } from 'antd'
 import {
   AppstoreOutlined,
   FilterOutlined,
   MoreOutlined,
+  NotificationOutlined,
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
@@ -84,6 +86,11 @@ export default function Dashboard(): React.JSX.Element {
   const [filterOpen, setFilterOpen] = useState(false)
   // 正在检查更新的项目 id（驱动卡片边框流光动效）
   const [checkingIds, setCheckingIds] = useState<Set<number>>(() => new Set())
+  // 气泡标签云是否展开（开关在命令栏左侧）
+  const [bubblesExpanded, setBubblesExpanded] = useState(false)
+  // 批量检查更新进行中（命令栏「检查更新」按钮 loading）
+  const [checkingAll, setCheckingAll] = useState(false)
+  const { token } = theme.useToken()
 
   useEffect(() => {
     void load()
@@ -139,21 +146,16 @@ export default function Dashboard(): React.JSX.Element {
         (b.pushedAt ?? b.updatedAt ?? '').localeCompare(a.pushedAt ?? a.updatedAt ?? '')
       )
     return sorted
-  }, [
-    bubble.filteredProjects,
-    keyword,
-    sortKey,
-    addedRange,
-    updatedRange,
-    analysisFilter,
-    tasks
-  ])
+  }, [bubble.filteredProjects, keyword, sortKey, addedRange, updatedRange, analysisFilter, tasks])
 
   // 已存在项目（owner/repo 小写集合，添加弹窗预览标记「已存在」）
   const existingProjectKeys = useMemo(
     () => new Set(projects.map((p) => `${p.owner}/${p.repo}`.toLowerCase())),
     [projects]
   )
+
+  // 存在未查看新版本的项目（「可更新」列表）
+  const updatable = useMemo(() => projects.filter((p) => p.hasUpdate), [projects])
 
   const handleAdd = async (urls: string[]): Promise<{ added: string[] }> => {
     let added = 0
@@ -216,6 +218,7 @@ export default function Dashboard(): React.JSX.Element {
   }
 
   const checkAllUpdates = async (): Promise<void> => {
+    setCheckingAll(true)
     try {
       const r = await window.api.checkUpdateAll()
       await load()
@@ -235,6 +238,7 @@ export default function Dashboard(): React.JSX.Element {
         message.success(t('dashboard.checkedAll', { count: r.checked }))
       }
     } finally {
+      setCheckingAll(false)
       setCheckingIds(new Set())
     }
   }
@@ -251,8 +255,7 @@ export default function Dashboard(): React.JSX.Element {
   }
 
   const handleMore = ({ key }: { key: string }): void => {
-    if (key === 'checkUpdate') void checkAllUpdates()
-    else if (key === 'refresh') void load()
+    if (key === 'refresh') void load()
     else if (key === 'color') {
       setProjectColorMode(projectColorMode === 'color' ? 'mono' : 'color')
     }
@@ -292,88 +295,141 @@ export default function Dashboard(): React.JSX.Element {
 
   return (
     <div className="page-container" style={{ padding: 16 }}>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 16 }}>
-        <Button icon={<PlusOutlined />} type="primary" onClick={() => setAddOpen(true)}>
-          {t('dashboard.addProject')}
-        </Button>
-      </div>
-
       {projects.length > 0 && (
         <>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: 12,
+              marginBottom: 12
+            }}
+          >
+            {/* 左侧：收窄控件（标签筛选开关 / 视图 / 搜索 / 排序 / 筛选 / 更多） */}
+            <Space wrap style={{ minWidth: 0 }}>
+              <Button
+                icon={<FilterOutlined />}
+                onClick={() => setBubblesExpanded((v) => !v)}
+                style={
+                  bubblesExpanded
+                    ? {
+                        color: token.colorPrimary,
+                        borderColor: token.colorPrimary,
+                        background: token.colorPrimaryBg
+                      }
+                    : undefined
+                }
+              >
+                {t('dashboard.tagFilter')}
+                {selectedTagIds.length > 0 ? ` (${selectedTagIds.length})` : ''}
+              </Button>
+              <Segmented<ViewMode>
+                value={view}
+                onChange={setView}
+                options={[
+                  {
+                    value: 'card',
+                    label: t('dashboard.viewCards'),
+                    icon: <AppstoreOutlined />
+                  },
+                  {
+                    value: 'table',
+                    label: t('dashboard.viewTable'),
+                    icon: <TableOutlined />
+                  }
+                ]}
+              />
+              <Input
+                allowClear
+                prefix={<SearchOutlined />}
+                placeholder={t('dashboard.searchPlaceholder')}
+                style={{ width: 200 }}
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+              />
+              <Select<SortKey>
+                value={sortKey}
+                onChange={setSortKey}
+                style={{ width: 120 }}
+                options={[
+                  { value: 'updatedAt', label: t('dashboard.sortUpdated') },
+                  { value: 'starCount', label: t('dashboard.sortStar') },
+                  { value: 'name', label: t('dashboard.sortName') }
+                ]}
+              />
+              <Popover
+                open={filterOpen}
+                onOpenChange={setFilterOpen}
+                trigger="click"
+                placement="bottomLeft"
+                content={filterContent}
+              >
+                <Badge count={activeFilterCount} size="small">
+                  <Button icon={<FilterOutlined />}>{t('dashboard.filter')}</Button>
+                </Badge>
+              </Popover>
+              <Dropdown
+                menu={{
+                  items: [
+                    { key: 'refresh', label: t('common.refresh'), icon: <SyncOutlined /> },
+                    { type: 'divider' },
+                    {
+                      key: 'color',
+                      label:
+                        projectColorMode === 'color'
+                          ? t('dashboard.switchToMono')
+                          : t('dashboard.switchToColor')
+                    }
+                  ],
+                  onClick: handleMore
+                }}
+              >
+                <Button icon={<MoreOutlined />} />
+              </Dropdown>
+            </Space>
+            {/* 右侧：固定行动（可更新 / 检查更新 / 添加项目） */}
+            <Space size={8} style={{ flexShrink: 0 }}>
+              {updatable.length > 0 && (
+                <Dropdown
+                  menu={{
+                    items: updatable.map((p) => ({
+                      key: p.id,
+                      label: p.lastVersion ? `${p.name} · ${p.lastVersion}` : p.name
+                    })),
+                    onClick: ({ key }) => {
+                      const id = Number(key)
+                      void window.api.markUpdateSeen(id)
+                      navigate(`/repository/${id}/releases`)
+                    }
+                  }}
+                >
+                  <Badge count={updatable.length} size="small">
+                    <Button icon={<NotificationOutlined />}>{t('dashboard.updatable')}</Button>
+                  </Badge>
+                </Dropdown>
+              )}
+              <Button
+                icon={<ReloadOutlined />}
+                loading={checkingAll}
+                onClick={() => void checkAllUpdates()}
+              >
+                {t('common.checkUpdate')}
+              </Button>
+              <Button icon={<PlusOutlined />} type="primary" onClick={() => setAddOpen(true)}>
+                {t('dashboard.addProject')}
+              </Button>
+            </Space>
+          </div>
+
           <BubbleFilter
             tags={tags}
             selectedTagIds={selectedTagIds}
             onToggle={toggleTag}
             onClear={clearFilters}
             bubble={bubble}
+            expanded={bubblesExpanded}
           />
-
-          <Space wrap style={{ marginBottom: 12 }}>
-            <Segmented<ViewMode>
-              value={view}
-              onChange={setView}
-              options={[
-                {
-                  value: 'card',
-                  label: t('dashboard.viewCards'),
-                  icon: <AppstoreOutlined />
-                },
-                {
-                  value: 'table',
-                  label: t('dashboard.viewTable'),
-                  icon: <TableOutlined />
-                }
-              ]}
-            />
-            <Input
-              allowClear
-              prefix={<SearchOutlined />}
-              placeholder={t('dashboard.searchPlaceholder')}
-              style={{ width: 200 }}
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-            />
-            <Select<SortKey>
-              value={sortKey}
-              onChange={setSortKey}
-              style={{ width: 120 }}
-              options={[
-                { value: 'updatedAt', label: t('dashboard.sortUpdated') },
-                { value: 'starCount', label: t('dashboard.sortStar') },
-                { value: 'name', label: t('dashboard.sortName') }
-              ]}
-            />
-            <Popover
-              open={filterOpen}
-              onOpenChange={setFilterOpen}
-              trigger="click"
-              placement="bottomLeft"
-              content={filterContent}
-            >
-              <Badge count={activeFilterCount} size="small">
-                <Button icon={<FilterOutlined />}>{t('dashboard.filter')}</Button>
-              </Badge>
-            </Popover>
-            <Dropdown
-              menu={{
-                items: [
-                  { key: 'checkUpdate', label: t('common.checkUpdate'), icon: <ReloadOutlined /> },
-                  { key: 'refresh', label: t('common.refresh'), icon: <SyncOutlined /> },
-                  { type: 'divider' },
-                  {
-                    key: 'color',
-                    label:
-                      projectColorMode === 'color'
-                        ? t('dashboard.switchToMono')
-                        : t('dashboard.switchToColor')
-                  }
-                ],
-                onClick: handleMore
-              }}
-            >
-              <Button icon={<MoreOutlined />} />
-            </Dropdown>
-          </Space>
         </>
       )}
 

@@ -13,6 +13,8 @@ interface Props {
   content: string
   owner: string
   repo: string
+  /** 紧凑图片模式：缩小为缩略图并尽量多张一行（版本发布说明用） */
+  compactImages?: boolean
 }
 
 /** 链接处理：外链交给主进程转系统浏览器，不导航当前窗口 */
@@ -35,7 +37,12 @@ function resolveImageSrc(src: string | undefined, owner: string, repo: string): 
  * - 相对图片转 raw 地址，外链系统浏览器打开
  * - 图片默认限制高度为缩略图（防长图占满窗口），点击 Modal 放大查看
  */
-export default function MarkdownViewer({ content, owner, repo }: Props): React.JSX.Element {
+export default function MarkdownViewer({
+  content,
+  owner,
+  repo,
+  compactImages = false
+}: Props): React.JSX.Element {
   const { t } = useTranslation()
   const [preview, setPreview] = useState<{ src: string; alt: string } | null>(null)
   const sanitized = useMemo(() => DOMPurify.sanitize(content), [content])
@@ -52,7 +59,10 @@ export default function MarkdownViewer({ content, owner, repo }: Props): React.J
 
   return (
     <>
-      <div className="markdown-body" style={mdStyle}>
+      <div
+        className={`markdown-body${compactImages ? ' compact-images' : ''}`}
+        style={mdStyle}
+      >
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           rehypePlugins={[rehypeRaw]}
@@ -69,13 +79,12 @@ export default function MarkdownViewer({ content, owner, repo }: Props): React.J
                   src={resolved}
                   alt={alt ?? ''}
                   loading="lazy"
-                  // 默认缩略图：限高防止长图/宽图占满窗口，点击放大
                   style={{
                     maxWidth: '100%',
-                    maxHeight: 300,
+                    maxHeight: compactImages ? 150 : 300,
                     objectFit: 'contain',
-                    margin: '4px auto',
-                    display: 'block',
+                    margin: compactImages ? 0 : '4px auto',
+                    display: compactImages ? 'inline-block' : 'block',
                     cursor: 'zoom-in',
                     background: 'rgba(0, 0, 0, 0.02)'
                   }}

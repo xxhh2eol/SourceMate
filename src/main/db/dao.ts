@@ -1,15 +1,21 @@
 import { getDb } from './index'
 import type { DatabaseSync } from 'node:sqlite'
+import { msg } from '../msg'
 import type {
   AiUsageLogInfo,
   CandidateTagView,
   GithubAccountView,
   GithubTokenStatus,
+  ProjectProfile,
   ProjectTagInfo,
   ProjectWithTags,
+  ScheduledTaskInfo,
+  ScheduledTaskStatus,
+  ScheduledTaskType,
   ReleaseAnalysisInfo,
   ReleaseAssetInfo,
   ReleaseFileInfo,
+  ReleaseFileTypeInfo,
   ReleaseInfo,
   TagDimension,
   TagInfo,
@@ -17,6 +23,12 @@ import type {
   TagStatus,
   TagWithCount
 } from '../../shared/types'
+import {
+  classifyReleaseFile,
+  normalizeKind,
+  normalizePlatform,
+  releaseFileFilterLabel
+} from '../../shared/releaseFileType'
 
 /**
  * 数据访问层（设计文档 §3）
@@ -44,6 +56,7 @@ interface ProjectRow {
   cnSummary: string | null
   lastVersion: string | null
   lastCheckedAt: string | null
+  hasUpdate: number
   createdAt: string
   updatedAt: string
 }
@@ -75,7 +88,8 @@ const PROJECT_COLUMNS = `
   readme_cache AS readmeCache, readme_en_cache AS readmeEnCache, readme_zh_cache AS readmeZhCache,
   readme_zh_ai_cache AS readmeZhAiCache, readme_ai_model AS readmeAiModel, cn_summary AS cnSummary,
   last_version AS lastVersion,
-  last_checked_at AS lastCheckedAt, created_at AS createdAt, updated_at AS updatedAt
+  last_checked_at AS lastCheckedAt, has_update AS hasUpdate,
+  created_at AS createdAt, updated_at AS updatedAt
 `
 
 /** node:sqlite 返回 Record 行，中转 unknown 转为强类型 */
@@ -120,6 +134,7 @@ function mapProject(row: ProjectRow): Omit<ProjectWithTags, 'tags'> {
     cnSummary: row.cnSummary,
     lastVersion: row.lastVersion,
     lastCheckedAt: row.lastCheckedAt,
+    hasUpdate: row.hasUpdate === 1,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   }
@@ -199,6 +214,8 @@ export function listProjectsWithSummaries(): Array<
     lastSyncAt: string | null
     /** 最近一次历史版本分析使用的模型（「使用模型」列回退来源之一） */
     lastReleaseModel: string | null
+    /** 是否存在未开始的预约任务（项目列表「已预约」状态） */
+    scheduled: boolean
   }
 > {
   const projects = listProjectsWithTags()
@@ -239,11 +256,13 @@ export function listProjectsWithSummaries(): Array<
   const byProject = new Map(rows.map((r) => [r.projectId, r]))
   const syncByProject = new Map(syncRows.map((r) => [r.projectId, r.lastSyncAt]))
   const releaseByProject = new Map(releaseRows.map((r) => [r.projectId, r.model ?? null]))
+  const scheduledIds = listScheduledProjectIds()
   return projects.map((p) => ({
     ...p,
     summary: byProject.get(p.id) ?? null,
     lastSyncAt: syncByProject.get(p.id) ?? null,
-    lastReleaseModel: releaseByProject.get(p.id) ?? null
+    lastReleaseModel: releaseByProject.get(p.id) ?? null,
+    scheduled: scheduledIds.has(p.id)
   }))
 }
 
@@ -267,6 +286,8 @@ export interface NewProjectInput {
   readmeAiModel?: string | null
   /** AI 标签分析产出的中文摘要（创建时无；由标签分析流程回写） */
   cnSummary?: string | null
+  /** 是否存在未查看的新版本（0/1；默认 0） */
+  hasUpdate?: number
 }
 
 export function createProject(input: NewProjectInput): ProjectWithTags {
@@ -309,6 +330,150 @@ export function deleteProject(id: number): void {
   getDb().prepare('DELETE FROM projects WHERE id = ?').run(id)
 }
 
+/** 存在未查看新版本的项目列表（「可更新」列表数据源） */
+export function listUpdatableProjects(): ProjectWithTags[] {
+  const db = getDb()
+  const rows = toRows<ProjectRow>(
+    db
+      .prepare(
+        `SELECT ${PROJECT_COLUMNS} FROM projects WHERE has_update = 1 ORDER BY updated_at DESC`
+      )
+      .all()
+  )
+  return rows.map((r) => ({ ...mapProject(r), tags: getProjectTags(db, r.id) }))
+}
+
+/** 标记项目的新版本已被查看（清除 has_update） */
+export function markUpdateSeen(projectId: number): void {
+  getDb()
+    .prepare('UPDATE projects SET has_update = 0, updated_at = ? WHERE id = ?')
+    .run(new Date().toISOString(), projectId)
+}
+
+// ---- 预约任务（定时调度） ----
+
+export interface ScheduledTaskRow {
+  id: number
+  projectId: number
+  type: string
+  startAt: string
+  endAt: string | null
+  status: string
+  taskId: number | null
+  enabled: number
+  createdAt: string
+}
+
+/** 全部预约任务（联查项目名，供「计划」页展示）；未开始在前，其次执行中，再是已结束 */
+export function listScheduledTasks(): ScheduledTaskInfo[] {
+  const rows = toRows<ScheduledTaskRow & { name: string; owner: string; repo: string }>(
+    getDb()
+      .prepare(
+        `SELECT s.id, s.project_id AS projectId, s.type, s.start_at AS startAt, s.end_at AS endAt,
+                s.status, s.task_id AS taskId, s.enabled, s.created_at AS createdAt,
+                p.name, p.owner, p.repo
+         FROM scheduled_tasks s JOIN projects p ON p.id = s.project_id
+         ORDER BY CASE s.status WHEN 'pending' THEN 0 WHEN 'running' THEN 1 ELSE 2 END, s.start_at ASC`
+      )
+      .all()
+  )
+  return rows.map((r) => ({
+    id: r.id,
+    projectId: r.projectId,
+    projectName: r.name,
+    owner: r.owner,
+    repo: r.repo,
+    type: r.type as ScheduledTaskType,
+    startAt: r.startAt,
+    endAt: r.endAt,
+    status: r.status as ScheduledTaskStatus,
+    taskId: r.taskId,
+    enabled: r.enabled === 1,
+    createdAt: r.createdAt
+  }))
+}
+
+/** 新建预约任务；同项目同类型已有 active（pending/running）时抛错（完成/失败后允许重新预约） */
+export function createScheduledTask(
+  projectId: number,
+  type: ScheduledTaskType,
+  startAt: string,
+  endAt: string | null
+): void {
+  const existing = getDb()
+    .prepare(
+      `SELECT id FROM scheduled_tasks WHERE project_id = ? AND type = ? AND status IN ('pending', 'running')`
+    )
+    .get(projectId, type)
+  if (existing) {
+    throw new Error(msg('该项目已存在同类计划任务', 'A scheduled task of this type already exists'))
+  }
+  getDb()
+    .prepare(
+      `INSERT INTO scheduled_tasks (project_id, type, start_at, end_at, status, created_at)
+       VALUES (?, ?, ?, ?, 'pending', ?)`
+    )
+    .run(projectId, type, startAt, endAt, new Date().toISOString())
+}
+
+/** 取消预约任务（仅未开始可取消，直接删除） */
+export function deleteScheduledTask(id: number): void {
+  getDb().prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id)
+}
+
+/** 清空已结束（done / failed）的预约任务记录 */
+export function clearCompletedScheduledTasks(): void {
+  getDb().prepare(`DELETE FROM scheduled_tasks WHERE status IN ('done', 'failed')`).run()
+}
+
+/** 修改预约任务的项目与开始时间（仅未开始可改） */
+export function updateScheduledTask(id: number, projectId: number, startAt: string): void {
+  getDb()
+    .prepare('UPDATE scheduled_tasks SET project_id = ?, start_at = ? WHERE id = ?')
+    .run(projectId, startAt, id)
+}
+
+/** 到期的未开始预约任务（start_at <= now），供调度器取出并入队 */
+export function listDueScheduledTasks(now: string): Array<{
+  id: number
+  projectId: number
+  type: string
+}> {
+  return toRows<{ id: number; projectId: number; type: string }>(
+    getDb()
+      .prepare(
+        `SELECT id, project_id AS projectId, type
+         FROM scheduled_tasks WHERE status = 'pending' AND start_at <= ? ORDER BY start_at ASC`
+      )
+      .all(now)
+  )
+}
+
+/** 触发预约任务：置 running 并记录入队的任务 id */
+export function markScheduledTaskRunning(id: number, taskId: number): void {
+  getDb()
+    .prepare(`UPDATE scheduled_tasks SET status = 'running', task_id = ? WHERE id = ?`)
+    .run(taskId, id)
+}
+
+/** 按入队任务 id 回写预约任务状态（任务终态时调用） */
+export function updateScheduledTaskStatusByTaskId(
+  taskId: number,
+  status: ScheduledTaskStatus
+): void {
+  getDb().prepare('UPDATE scheduled_tasks SET status = ? WHERE task_id = ?').run(status, taskId)
+}
+
+/** 存在未开始预约任务的项目 id 集合（项目列表「已预约」状态） */
+export function listScheduledProjectIds(): Set<number> {
+  const rows = toRows<{ projectId: number }>(
+    getDb()
+      .prepare(`SELECT project_id AS projectId FROM scheduled_tasks WHERE status = 'pending'`)
+      .all()
+  )
+  return new Set(rows.map((r) => r.projectId))
+}
+
 export function updateProjectMeta(
   id: number,
   patch: Partial<
@@ -328,6 +493,7 @@ export function updateProjectMeta(
       | 'readmeZhAi'
       | 'readmeAiModel'
       | 'cnSummary'
+      | 'hasUpdate'
     >
   > & {
     lastVersion?: string | null
@@ -443,9 +609,7 @@ export function getGithubAccountById(id: number): GithubAccountView | null {
 /** 读取账号的加密 token（解密由服务层 secret.ts 负责） */
 export function getGithubTokenEnc(id: number): string | null {
   const row = toRow<{ tokenEnc: string }>(
-    getDb()
-      .prepare('SELECT token_enc AS tokenEnc FROM github_accounts WHERE id = ?')
-      .get(id)
+    getDb().prepare('SELECT token_enc AS tokenEnc FROM github_accounts WHERE id = ?').get(id)
   )
   return row?.tokenEnc ?? null
 }
@@ -535,7 +699,9 @@ export function updateGithubAccount(id: number, patch: UpdateGithubAccountPatch)
   }
   if (sets.length === 0) return
   values.push(id)
-  getDb().prepare(`UPDATE github_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...values)
+  getDb()
+    .prepare(`UPDATE github_accounts SET ${sets.join(', ')} WHERE id = ?`)
+    .run(...values)
 }
 
 export function deleteGithubAccount(id: number): void {
@@ -550,9 +716,7 @@ export function migrateLegacyGithubToken(): void {
   const stored = getSetting('github.tokenEnc', '')
   if (!stored) return
   const db = getDb()
-  const count = toRow<{ n: number }>(
-    db.prepare('SELECT COUNT(*) AS n FROM github_accounts').get()
-  )
+  const count = toRow<{ n: number }>(db.prepare('SELECT COUNT(*) AS n FROM github_accounts').get())
   if (count && count.n > 0) {
     setSetting('github.tokenEnc', '')
     return
@@ -574,6 +738,7 @@ export interface SummaryRow {
   usage: string | null
   techAnalysis: string | null
   learningValue: string | null
+  profile: string | null
   rawJson: string | null
   model: string | null
   tokensUsed: number
@@ -585,13 +750,36 @@ export function getLatestSummary(projectId: number): SummaryRow | null {
     getDb()
       .prepare(
         `SELECT id, project_id AS projectId, intro, usage, tech_analysis AS techAnalysis,
-                learning_value AS learningValue, raw_json AS rawJson, model,
+                learning_value AS learningValue, profile, raw_json AS rawJson, model,
                 tokens_used AS tokensUsed, created_at AS createdAt
          FROM ai_summaries WHERE project_id = ? ORDER BY id DESC LIMIT 1`
       )
       .get(projectId)
   )
   return row ?? null
+}
+
+/** 保存五维项目画像：profile 存 JSON，intro 同步写入定位一句话（列表搜索沿用） */
+export function saveProjectProfile(
+  projectId: number,
+  profile: ProjectProfile,
+  model: string,
+  tokensUsed: number
+): void {
+  getDb()
+    .prepare(
+      `INSERT INTO ai_summaries
+         (project_id, intro, profile, model, tokens_used, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      projectId,
+      profile.positioning,
+      JSON.stringify(profile),
+      model,
+      tokensUsed,
+      new Date().toISOString()
+    )
 }
 
 // ---- 任务队列（M4） ----
@@ -773,7 +961,9 @@ function getTagById(id: number): TagInfo | null {
 /** 候选标签升级为正式标签（仅 candidate → official 生效） */
 export function promoteTag(tagId: number): TagInfo | null {
   const result = getDb()
-    .prepare("UPDATE tags SET status = 'official', alias_of = NULL WHERE id = ? AND status = 'candidate'")
+    .prepare(
+      "UPDATE tags SET status = 'official', alias_of = NULL WHERE id = ? AND status = 'candidate'"
+    )
     .run(tagId)
   if (Number(result.changes) === 0) return null
   return getTagById(tagId)
@@ -813,7 +1003,11 @@ export function rejectTag(tagId: number): void {
  * 即使 AI 绕过黑名单，被拒标签也回到候选池可见可管理，而不是以 rejected 状态挂回项目）。
  * nameCn 为中文展示名（可空）；已存在且中文名为空、本次提供时回填（AI 首次产出英文、后续产出中文时自动补上）。
  */
-export function createCandidateTag(name: string, dimension: TagDimension, nameCn?: string | null): TagInfo {
+export function createCandidateTag(
+  name: string,
+  dimension: TagDimension,
+  nameCn?: string | null
+): TagInfo {
   const db = getDb()
   const existing = toRow<TagRow>(
     db
@@ -829,7 +1023,9 @@ export function createCandidateTag(name: string, dimension: TagDimension, nameCn
     }
     // 被拒标签复活：重置为候选，等待人工再次审核
     if (existing.status === 'rejected') {
-      db.prepare("UPDATE tags SET status = 'candidate', alias_of = NULL WHERE id = ?").run(existing.id)
+      db.prepare("UPDATE tags SET status = 'candidate', alias_of = NULL WHERE id = ?").run(
+        existing.id
+      )
       return { ...existing, status: 'candidate', aliasOf: null }
     }
     return existing
@@ -853,7 +1049,11 @@ export function createCandidateTag(name: string, dimension: TagDimension, nameCn
  * 名称查找大小写不敏感（COLLATE NOCASE）：AI/话题的小写形式与语言/词表的规范大小写视为同一标签，
  * 防止「插件/Skill」与「插件/skill」这类大小写变体各自建行。
  */
-export function getOrCreateTag(name: string, dimension: TagDimension, nameCn?: string | null): TagInfo {
+export function getOrCreateTag(
+  name: string,
+  dimension: TagDimension,
+  nameCn?: string | null
+): TagInfo {
   const db = getDb()
   const existing = toRow<TagRow>(
     db
@@ -888,7 +1088,9 @@ export function assignTag(projectId: number, tagId: number, source: TagSource = 
   const db = getDb()
   const now = new Date().toISOString()
   const existing = toRow<{ id: number }>(
-    db.prepare('SELECT id FROM project_tags WHERE project_id = ? AND tag_id = ?').get(projectId, tagId)
+    db
+      .prepare('SELECT id FROM project_tags WHERE project_id = ? AND tag_id = ?')
+      .get(projectId, tagId)
   )
   if (existing) {
     // 已挂过（AI/同步等其他来源）：手动添加视为人工确认，升级为指定来源并清空 AI 溯源，
@@ -941,7 +1143,15 @@ export function replaceProjectTags(
     if (!item.name) continue
     const tag = getOrCreateTag(item.name, item.dimension, item.nameCn)
     if (exists.get(projectId, tag.id)) continue // 其他来源先占，忽略
-    insert.run(projectId, tag.id, source, item.confidence ?? null, item.aiModel ?? null, item.reason ?? null, now)
+    insert.run(
+      projectId,
+      tag.id,
+      source,
+      item.confidence ?? null,
+      item.aiModel ?? null,
+      item.reason ?? null,
+      now
+    )
   }
 }
 
@@ -967,7 +1177,15 @@ export function appendProjectTag(
   db.prepare(
     `INSERT INTO project_tags (project_id, tag_id, source, confidence, ai_model, reason, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(projectId, tag.id, source, confidence ?? null, aiModel ?? null, reason ?? null, new Date().toISOString())
+  ).run(
+    projectId,
+    tag.id,
+    source,
+    confidence ?? null,
+    aiModel ?? null,
+    reason ?? null,
+    new Date().toISOString()
+  )
 }
 
 /**
@@ -1200,12 +1418,18 @@ function parseReleaseFiles(json: string): ReleaseFileInfo[] {
     const arr = JSON.parse(json) as unknown
     if (!Array.isArray(arr)) return []
     return arr
-      .filter((f): f is ReleaseFileInfo => !!f && typeof f === 'object' && typeof (f as ReleaseFileInfo).name === 'string')
+      .filter(
+        (f): f is ReleaseFileInfo =>
+          !!f && typeof f === 'object' && typeof (f as ReleaseFileInfo).name === 'string'
+      )
       .map((f) => ({
         name: f.name,
         sha256: f.sha256 ?? null,
         url: f.url ?? '',
-        note: f.note ?? ''
+        note: f.note ?? '',
+        platform: f.platform ?? null,
+        arch: f.arch ?? null,
+        kind: f.kind ?? null
       }))
   } catch {
     return []
@@ -1245,6 +1469,117 @@ export function saveReleaseAnalysis(input: {
       input.tokensUsed,
       new Date().toISOString()
     )
+}
+
+interface ReleaseFileTypeRow {
+  id: number
+  platform: string
+  kind: string
+  label: string
+  source: 'rule' | 'ai'
+  createdAt: string
+  updatedAt: string
+}
+
+function upsertReleaseFileType(input: {
+  platform: string
+  arch: string | null
+  kind: string
+  label: string
+  source: 'rule' | 'ai'
+}): void {
+  const now = new Date().toISOString()
+  getDb()
+    .prepare(
+      `INSERT INTO release_file_types (platform, arch, kind, label, source, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(label) DO UPDATE SET
+         platform = excluded.platform,
+         arch = excluded.arch,
+         kind = excluded.kind,
+         label = excluded.label,
+         source = CASE WHEN release_file_types.source = 'rule' THEN 'rule' ELSE excluded.source END,
+         updated_at = excluded.updated_at`
+    )
+    .run(input.platform, input.arch, input.kind, input.label, input.source, now, now)
+}
+
+/** 把文件的结构化类型（本地规则 + AI 补全）去重写入类型字典表 */
+export function syncReleaseFileTypes(
+  files: Array<
+    Pick<ReleaseFileInfo, 'name' | 'platform' | 'arch' | 'kind'> & { note?: string | null }
+  >
+): void {
+  for (const file of files) {
+    const local = classifyReleaseFile(file.name, file.note)
+    const platform = normalizePlatform(file.platform) ?? local.platform ?? 'other'
+    const kind = normalizeKind(file.kind) ?? local.kind ?? 'other'
+    const label = releaseFileFilterLabel(file)
+    upsertReleaseFileType({
+      platform,
+      arch: file.arch ?? local.arch ?? null,
+      kind,
+      label,
+      // 有结构化字段视为 AI/分析补全；纯本地文件名识别记为本地规则
+      source: file.platform || file.kind ? 'ai' : 'rule'
+    })
+  }
+}
+
+export function listReleaseFileTypes(): ReleaseFileTypeInfo[] {
+  const rows = toRows<ReleaseFileTypeRow>(
+    getDb()
+      .prepare(
+        `SELECT id, platform, kind, label, source, created_at AS createdAt, updated_at AS updatedAt
+         FROM release_file_types ORDER BY label`
+      )
+      .all()
+  )
+  return rows
+}
+
+/** 启动时扫描已有版本记录，把常见类型 + AI 补全类型全部去重补入类型字典 */
+export function rebuildReleaseFileTypes(): void {
+  const analysisRows = toRows<{ files: string }>(
+    getDb().prepare('SELECT files FROM release_analyses').all()
+  )
+  for (const row of analysisRows) {
+    syncReleaseFileTypes(parseReleaseFiles(row.files))
+  }
+
+  const releaseRows = toRows<{ assets: string | null }>(
+    getDb().prepare('SELECT assets FROM release_records').all()
+  )
+  for (const row of releaseRows) {
+    syncReleaseFileTypes(
+      parseReleaseAssets(row.assets).map((a) => ({
+        name: a.name,
+        note: null,
+        platform: null,
+        arch: null,
+        kind: null
+      }))
+    )
+  }
+}
+
+const RELEASE_FILE_TYPES_REBUILD_VERSION = 5
+
+/**
+ * 启动时按版本号一次性回填类型字典：
+ * 只有首次升级到该版本（或恢复旧备份）时才全量扫描，之后启动直接跳过。
+ */
+export function ensureReleaseFileTypesRebuilt(): void {
+  if (
+    getSetting<number>('release_file_types_rebuild_version', 0) ===
+    RELEASE_FILE_TYPES_REBUILD_VERSION
+  ) {
+    return
+  }
+  // 分类规则变化时清空旧类型，避免下拉里残留历史标签
+  getDb().prepare('DELETE FROM release_file_types').run()
+  rebuildReleaseFileTypes()
+  setSetting('release_file_types_rebuild_version', RELEASE_FILE_TYPES_REBUILD_VERSION)
 }
 
 /** 项目最近一次成功拉取 Releases 的时间（MAX(checked_at)），无记录返回 null */
@@ -1330,7 +1665,12 @@ export function getAiUsageByModel(): Array<{
          FROM ai_usage_logs GROUP BY model ORDER BY tokens DESC`
       )
       .all()
-  ).map((r) => ({ model: r.model, tokens: r.tokens ?? 0, requests: r.requests ?? 0, durationMs: r.durationMs ?? 0 }))
+  ).map((r) => ({
+    model: r.model,
+    tokens: r.tokens ?? 0,
+    requests: r.requests ?? 0,
+    durationMs: r.durationMs ?? 0
+  }))
 }
 
 /** 各功能累计（token 降序） */
@@ -1379,7 +1719,9 @@ export function getAiUsageLogPage(
   const db = getDb()
   const where = model ? 'WHERE model = ?' : ''
   const totalRow = toRow<{ total: number }>(
-    db.prepare(`SELECT COUNT(*) AS total FROM ai_usage_logs ${where}`).get(...(model ? [model] : []))
+    db
+      .prepare(`SELECT COUNT(*) AS total FROM ai_usage_logs ${where}`)
+      .get(...(model ? [model] : []))
   )
   const rows = toRows<{
     id: number

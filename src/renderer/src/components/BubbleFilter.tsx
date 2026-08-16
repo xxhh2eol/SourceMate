@@ -1,6 +1,5 @@
-import { useState } from 'react'
 import { Button, Space, Tag, Tooltip } from 'antd'
-import { ClearOutlined, FilterOutlined } from '@ant-design/icons'
+import { ClearOutlined } from '@ant-design/icons'
 import { useTranslation } from 'react-i18next'
 import { TAG_DIMENSIONS } from '@shared/types'
 import type { TagWithCount } from '@shared/types'
@@ -9,9 +8,10 @@ import { tagBgColor, tagBorderColor, tagColor } from '../utils/color'
 
 /**
  * 气泡标签筛选器（设计文档 §5 / 项目简介）
- * - 按标签名取黄金角稳定色：文字/选中边框 = 主色，填充 = 淡色，未选中边框 = 淡透明
+ * - 按维度分色：类型=蓝 / 技术栈=绿 / 用途=橙
  * - 气泡大小 ∝ 关联项目数（sqrt 归一化）
  * - 点击选中 → 不兼容气泡破灭（动效 + 置灰），取消选中自动恢复
+ * - 展开开关已上提到 Dashboard 命令栏左侧，本组件只负责已选标签条 + 气泡云
  */
 
 interface Props {
@@ -20,68 +20,50 @@ interface Props {
   onToggle: (tagId: number) => void
   onClear: () => void
   bubble: BubbleState
+  /** 气泡标签云是否展开 */
+  expanded: boolean
 }
 
-/**
- * 气泡标签筛选器（设计文档 §5 / 项目简介）
- * - 按维度分色：类型=蓝 / 技术栈=绿 / 用途=橙
- * - 气泡大小 ∝ 关联项目数（sqrt 归一化）
- * - 点击选中 → 不兼容气泡破灭（动效 + 置灰），取消选中自动恢复
- */
 export default function BubbleFilter({
   tags,
   selectedTagIds,
   onToggle,
   onClear,
-  bubble
-}: Props): React.JSX.Element {
+  bubble,
+  expanded
+}: Props): React.JSX.Element | null {
   const { t } = useTranslation()
-  const [expanded, setExpanded] = useState(false)
   const selectedTags = tags.filter(
     (tag) => selectedTagIds.includes(tag.id) && tag.dimension !== 'topic'
   )
 
+  // 未展开且无已选标签时不渲染（不占垂直空间）
+  if (!expanded && selectedTags.length === 0) return null
+
   return (
     <div style={{ marginBottom: 12 }}>
-      <Space size={8} wrap>
-        <Button
-          size="small"
-          icon={<FilterOutlined />}
-          onClick={() => setExpanded((v) => !v)}
-        >
-          {t('dashboard.tagFilter')}
-          {selectedTagIds.length > 0 ? ` (${selectedTagIds.length})` : ''}
-        </Button>
-        {selectedTags.length > 0 && (
-          <>
-            <Space size={4} wrap>
-              {selectedTags.map((t) => (
-                <Tag
-                  key={t.id}
-                  closable
-                  color={tagColor(t.nameCn ?? t.name)}
-                  onClose={() => onToggle(t.id)}
-                >
-                  {t.nameCn ?? t.name}
-                </Tag>
-              ))}
-            </Space>
-            <Tooltip title={t('common.clear')}>
-              <Button size="small" type="text" icon={<ClearOutlined />} onClick={onClear}>
-                {t('common.clear')}
-              </Button>
-            </Tooltip>
-          </>
-        )}
-        {expanded && (
-          <Button size="small" type="text" onClick={() => setExpanded(false)}>
-            {t('nav.collapse')}
-          </Button>
-        )}
-      </Space>
+      {selectedTags.length > 0 && (
+        <Space size={4} wrap>
+          {selectedTags.map((t) => (
+            <Tag
+              key={t.id}
+              closable
+              color={tagColor(t.nameCn ?? t.name)}
+              onClose={() => onToggle(t.id)}
+            >
+              {t.nameCn ?? t.name}
+            </Tag>
+          ))}
+          <Tooltip title={t('common.clear')}>
+            <Button size="small" type="text" icon={<ClearOutlined />} onClick={onClear}>
+              {t('common.clear')}
+            </Button>
+          </Tooltip>
+        </Space>
+      )}
 
       {expanded && (
-        <div style={{ marginTop: 8 }}>
+        <div style={{ marginTop: selectedTags.length > 0 ? 8 : 0 }}>
           {TAG_DIMENSIONS.map((dim) => {
             // topic 标签仅入库暂不展示（后续统一处理），筛选气泡不显示该分组
             if (dim === 'topic') return null

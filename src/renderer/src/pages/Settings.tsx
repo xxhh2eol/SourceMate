@@ -11,6 +11,7 @@ import {
   Input,
   InputNumber,
   Layout,
+  List,
   Menu,
   Modal,
   Popconfirm,
@@ -34,6 +35,7 @@ import {
   RobotOutlined,
   HistoryOutlined,
   PlusOutlined,
+  SaveOutlined,
   StarOutlined,
   UserOutlined
 } from '@ant-design/icons'
@@ -41,6 +43,8 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import type { ModelProfileView } from '../../../preload'
 import type {
+  AutoBackupSettings,
+  BackupDirInfo,
   GithubAccountView,
   GithubTokenStatus,
   StarredImportProgress
@@ -131,6 +135,10 @@ function GeneralPanel({
   const setUiFontFamily = useSettingsStore((s) => s.setUiFontFamily)
   const markdownFontFamily = useSettingsStore((s) => s.markdownFontFamily)
   const setMarkdownFontFamily = useSettingsStore((s) => s.setMarkdownFontFamily)
+  const [autoCheckUpdate, setAutoCheckUpdate] = useState(false)
+  useEffect(() => {
+    void window.api.getSetting<boolean>('autoCheckUpdate.enabled', false).then(setAutoCheckUpdate)
+  }, [])
 
   return (
     <Card title={t('settings.general')} style={{ maxWidth: 560 }}>
@@ -192,6 +200,16 @@ function GeneralPanel({
           <span style={{ width: 100 }}>{t('settings.markdownFont')}</span>
           <FontPicker value={markdownFontFamily} onChange={setMarkdownFontFamily} />
         </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <span style={{ width: 100 }}>{t('settings.autoCheckUpdate')}</span>
+          <Switch
+            checked={autoCheckUpdate}
+            onChange={(v) => {
+              setAutoCheckUpdate(v)
+              void window.api.setSetting('autoCheckUpdate.enabled', v)
+            }}
+          />
+        </div>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           {t('settings.fontTip')}
         </Typography.Text>
@@ -225,7 +243,9 @@ function ModelPanel(): React.JSX.Element {
   }, [loadModels])
 
   useEffect(() => {
-    void window.api.getSetting<number>('ai.concurrency', 3).then((v) => setConcurrency(Number(v) || 3))
+    void window.api
+      .getSetting<number>('ai.concurrency', 3)
+      .then((v) => setConcurrency(Number(v) || 3))
   }, [])
 
   const openAdd = (): void => {
@@ -720,7 +740,9 @@ function CredentialsPanel(): React.JSX.Element {
       title: t('settings.colStatus'),
       key: 'status',
       width: 150,
-      render: (_, a) => <Tag color={statusMeta(a.tokenStatus).color}>{statusMeta(a.tokenStatus).label}</Tag>
+      render: (_, a) => (
+        <Tag color={statusMeta(a.tokenStatus).color}>{statusMeta(a.tokenStatus).label}</Tag>
+      )
     },
     {
       title: t('settings.colAddedAt'),
@@ -829,7 +851,9 @@ function CredentialsPanel(): React.JSX.Element {
             <Progress
               percent={progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0}
               size="small"
-              status={progress.failed > 0 && progress.done === progress.total ? 'exception' : 'active'}
+              status={
+                progress.failed > 0 && progress.done === progress.total ? 'exception' : 'active'
+              }
             />
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               {t('settings.starredProcessing', {
@@ -870,7 +894,9 @@ function CredentialsPanel(): React.JSX.Element {
             <Input.Password
               value={token}
               onChange={(e) => setToken(e.target.value)}
-              placeholder={editing ? t('settings.accountTokenKeepTip') : t('settings.tokenPlaceholder')}
+              placeholder={
+                editing ? t('settings.accountTokenKeepTip') : t('settings.tokenPlaceholder')
+              }
               autoComplete="off"
               style={{ marginTop: 4 }}
             />
@@ -968,9 +994,7 @@ function NetworkPanel(): React.JSX.Element {
             style={{ width: 120 }}
             value={proxy.protocol}
             disabled={!proxy.enabled}
-            onChange={(protocol) =>
-              setProxy({ ...proxy, protocol: protocol as 'http' | 'socks5' })
-            }
+            onChange={(protocol) => setProxy({ ...proxy, protocol: protocol as 'http' | 'socks5' })}
             options={[
               { value: 'http', label: t('settings.proxyHttp') },
               { value: 'socks5', label: t('settings.proxySocks5') }
@@ -1021,11 +1045,76 @@ function NetworkPanel(): React.JSX.Element {
 function DataPanel(): React.JSX.Element {
   const { t } = useTranslation()
   const [busy, setBusy] = useState<string | null>(null)
+  const [settings, setSettings] = useState<AutoBackupSettings | null>(null)
+  const [backupInfo, setBackupInfo] = useState<BackupDirInfo | null>(null)
+  const [modalOpen, setModalOpen] = useState(false)
+
+  const loadBackupData = useCallback(async (): Promise<void> => {
+    const [s, info] = await Promise.all([
+      window.api.getAutoBackupSettings(),
+      window.api.listBackupFiles()
+    ])
+    setSettings(s)
+    setBackupInfo(info)
+  }, [])
+
+  useEffect(() => {
+    void loadBackupData()
+  }, [loadBackupData])
 
   /** 打开自动备份目录（系统文件管理器） */
   const openBackups = async (): Promise<void> => {
     const r = await window.api.openBackupsDir()
     if (!r.ok) message.error(r.error ?? t('common.failed'))
+  }
+
+  const pickDir = async (): Promise<void> => {
+    const r = await window.api.pickBackupDir()
+    if (r.ok && r.path) {
+      setSettings((prev) => (prev ? { ...prev, dir: r.path as string } : prev))
+    }
+  }
+
+  const openBackupFiles = async (): Promise<void> => {
+    const info = await window.api.listBackupFiles()
+    setBackupInfo(info)
+    setModalOpen(true)
+  }
+
+  const saveSettings = async (): Promise<void> => {
+    if (!settings) return
+    setBusy('save')
+    try {
+      const r = await window.api.saveAutoBackupSettings(settings)
+      if (r.ok) {
+        message.success(t('settings.backupSaved'))
+        await loadBackupData()
+      } else {
+        message.error(r.error ?? t('common.failed'))
+      }
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const formatBytes = (n: number): string => {
+    if (n < 1024) return `${n} B`
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
+    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
+  }
+
+  const formatBackupTime = (iso: string | null): string => {
+    if (!iso) return '—'
+    return new Date(iso).toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    })
   }
 
   const run = async (
@@ -1045,30 +1134,84 @@ function DataPanel(): React.JSX.Element {
 
   return (
     <Card title={t('settings.dataTitle')} style={{ maxWidth: 560 }}>
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-        message={
-          <span>
-            {t('settings.autoBackupTip')}
-            {/* 点击「用户数据目录」/「打开路径」在系统文件管理器中打开备份目录 */}
-            <Typography.Link onClick={() => void openBackups()}>
-              {t('settings.userDataDir')}
-            </Typography.Link>
-            {t('settings.autoBackupTipTail')}
-            <Button
-              type="link"
-              size="small"
-              icon={<FolderOpenOutlined />}
-              onClick={() => void openBackups()}
-            >
-              {t('settings.openBackupsDir')}
+      <Space direction="vertical" style={{ width: '100%' }} size={12}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between'
+          }}
+        >
+          <Typography.Text>{t('settings.autoBackupEnabled')}</Typography.Text>
+          <Switch
+            checked={settings?.enabled ?? true}
+            onChange={(enabled) => setSettings((prev) => (prev ? { ...prev, enabled } : prev))}
+          />
+        </div>
+
+        <div>
+          <Typography.Text>{t('settings.backupDir')}</Typography.Text>
+          <Space.Compact style={{ width: '100%', marginTop: 4 }}>
+            <Input
+              value={settings?.dir ?? ''}
+              onChange={(e) =>
+                setSettings((prev) => (prev ? { ...prev, dir: e.target.value } : prev))
+              }
+            />
+            <Button icon={<FolderOpenOutlined />} onClick={() => void pickDir()}>
+              {t('settings.browse')}
             </Button>
-          </span>
-        }
-      />
-      <Space direction="vertical" style={{ width: '100%' }} size={8}>
+            <Button icon={<HistoryOutlined />} onClick={() => void openBackupFiles()}>
+              {t('settings.viewBackups')}
+            </Button>
+          </Space.Compact>
+        </div>
+
+        <div style={{ display: 'flex', gap: 16 }}>
+          <div style={{ flex: 1 }}>
+            <Typography.Text>{t('settings.keepCount')}</Typography.Text>
+            <InputNumber
+              min={1}
+              max={999}
+              style={{ width: '100%', marginTop: 4 }}
+              value={settings?.keepCount}
+              onChange={(v) =>
+                setSettings((prev) => (prev ? { ...prev, keepCount: v ?? 5 } : prev))
+              }
+            />
+          </div>
+          <div style={{ flex: 1 }}>
+            <Typography.Text>{t('settings.intervalMinutes')}</Typography.Text>
+            <InputNumber
+              min={1}
+              max={1440}
+              style={{ width: '100%', marginTop: 4 }}
+              value={settings?.intervalMinutes}
+              onChange={(v) =>
+                setSettings((prev) => (prev ? { ...prev, intervalMinutes: v ?? 30 } : prev))
+              }
+            />
+          </div>
+        </div>
+
+        <Space>
+          <Button
+            type="primary"
+            icon={<SaveOutlined />}
+            loading={busy === 'save'}
+            onClick={() => void saveSettings()}
+          >
+            {t('common.save')}
+          </Button>
+          <Button icon={<FolderOpenOutlined />} onClick={() => void openBackups()}>
+            {t('settings.openBackupsDir')}
+          </Button>
+        </Space>
+
+        <Alert type="info" showIcon message={t('settings.autoBackupTip')} />
+
+        <Divider style={{ margin: '4px 0' }} />
+
         <Button
           icon={<DatabaseOutlined />}
           loading={busy === 'backup'}
@@ -1084,6 +1227,47 @@ function DataPanel(): React.JSX.Element {
           {t('settings.restore')}
         </Button>
       </Space>
+
+      <Modal
+        open={modalOpen}
+        onCancel={() => setModalOpen(false)}
+        footer={null}
+        width={640}
+        title={t('settings.backupFiles')}
+      >
+        <Typography.Text type="secondary">
+          {t('settings.backupDir')}: {backupInfo?.dir}
+        </Typography.Text>
+        <br />
+        <Typography.Text type="secondary">
+          {t('settings.backupDirSize')}: {formatBytes(backupInfo?.totalSize ?? 0)}
+        </Typography.Text>
+        <List
+          style={{ marginTop: 12 }}
+          dataSource={backupInfo?.files ?? []}
+          locale={{ emptyText: t('settings.noBackupFiles') }}
+          renderItem={(f) => (
+            <List.Item
+              extra={
+                <Tag color={f.kind === 'auto' ? 'blue' : 'default'}>
+                  {f.kind === 'auto' ? t('settings.backupAuto') : t('settings.backupManual')}
+                </Tag>
+              }
+            >
+              <List.Item.Meta
+                title={formatBackupTime(f.createdAt)}
+                description={
+                  <span>
+                    {f.name}
+                    <br />
+                    {formatBytes(f.size)}
+                  </span>
+                }
+              />
+            </List.Item>
+          )}
+        />
+      </Modal>
     </Card>
   )
 }

@@ -1,14 +1,7 @@
 /** 主进程与渲染进程共享的类型定义（设计文档 §3 数据模型） */
 
 export type TagDimension =
-  | 'type'
-  | 'tech'
-  | 'purpose'
-  | 'audience'
-  | 'domain'
-  | 'capability'
-  | 'language'
-  | 'topic'
+  'type' | 'tech' | 'purpose' | 'audience' | 'domain' | 'capability' | 'language' | 'topic'
 
 export const TAG_DIMENSIONS: TagDimension[] = [
   'type',
@@ -130,6 +123,8 @@ export interface ProjectWithTags {
   cnSummary: string | null
   lastVersion: string | null
   lastCheckedAt: string | null
+  /** 是否存在用户尚未查看的新版本（检查更新时置 true，进详情/看版本后置 false） */
+  hasUpdate: boolean
   createdAt: string
   updatedAt: string
   tags: ProjectTagInfo[]
@@ -162,6 +157,25 @@ export interface ReleaseFileInfo {
   url: string
   /** 文件说明（本地命名规则优先，AI 兜底，如「Linux x64 版本」「Windows arm64 版本」） */
   note: string
+  /** 结构化平台（windows / macos / linux / ...；本地规则或 AI 输出，可含 AI 新增类型） */
+  platform: string | null
+  /** 结构化架构（x64 / arm64 / ...；本地规则或 AI 输出） */
+  arch: string | null
+  /** 结构化包类型（installer / source / checksum / signature / ...；本地规则或 AI 输出） */
+  kind: string | null
+}
+
+/** 历史版本文件类型字典（本地规则 + AI 补全，去重入库，供全局过滤下拉使用） */
+export interface ReleaseFileTypeInfo {
+  id: number
+  platform: string
+  kind: string
+  /** 展示标签，如「Windows 安装包」「源代码」 */
+  label: string
+  /** 来源：rule 本地规则 / ai AI 补全 */
+  source: 'rule' | 'ai'
+  createdAt: string
+  updatedAt: string
 }
 
 /** 历史版本记录 AI 分析结果（每项目每版本一条） */
@@ -237,6 +251,34 @@ export interface StarredImportResult {
   accounts: StarredImportAccountResult[]
 }
 
+/** 自动备份任务设置（存储于 settings key-value，主进程定时器读取） */
+export interface AutoBackupSettings {
+  enabled: boolean
+  /** 备份目录 */
+  dir: string
+  /** 保留自动备份份数 */
+  keepCount: number
+  /** 运行中数据变化后的备份间隔（分钟） */
+  intervalMinutes: number
+}
+
+/** 备份目录中的单个文件（用于“查看备份文件”弹窗） */
+export interface BackupFileInfo {
+  name: string
+  path: string
+  size: number
+  /** auto 自动备份 / manual 手动备份 */
+  kind: 'auto' | 'manual'
+  /** 自动备份从文件名解析出的本地时间 ISO；手动备份取文件修改时间 */
+  createdAt: string | null
+}
+
+export interface BackupDirInfo {
+  dir: string
+  files: BackupFileInfo[]
+  totalSize: number
+}
+
 export interface TaskItem {
   id: number
   projectId: number
@@ -250,6 +292,49 @@ export interface TaskItem {
   projectName?: string
 }
 
+/** 预约任务类型：AI 分析（tag_analysis）/ README 分析（readme_analyze） */
+export type ScheduledTaskType = 'ai_analysis' | 'readme_analyze'
+
+/** 预约任务生命周期状态 */
+export type ScheduledTaskStatus = 'pending' | 'running' | 'done' | 'failed'
+
+/** 预约任务（含项目信息，供「计划」页展示） */
+export interface ScheduledTaskInfo {
+  id: number
+  projectId: number
+  projectName: string
+  owner: string
+  repo: string
+  type: ScheduledTaskType
+  startAt: string
+  endAt: string | null
+  status: ScheduledTaskStatus
+  /** 触发后对应的任务 id（执行中/完成溯源） */
+  taskId: number | null
+  enabled: boolean
+  createdAt: string
+}
+
+/** 五维项目画像（升级版 ai_summaries，AI 生成的结构化内容） */
+export interface ProjectProfile {
+  /** 定位：一句话说明项目是什么、做什么 */
+  positioning: string
+  /** 痛点：解决什么问题、为什么需要 */
+  painPoints: string
+  /** 上手：安装/快速开始 + 最小示例 + 上手成本 */
+  gettingStarted: string
+  /** 时机：适用场景 */
+  suitableScenarios: string
+  /** 时机：不适用场景 / 边界 */
+  unsuitableScenarios: string
+  /** 效果：使用效果 / 口碑 */
+  effect: string
+  /** 学习价值评分 1-5 */
+  learningScore: number
+  /** 学习价值理由 */
+  learningReason: string
+}
+
 export interface AiSummaryInfo {
   id: number
   projectId: number
@@ -257,6 +342,8 @@ export interface AiSummaryInfo {
   usage: string | null
   techAnalysis: string | null
   learningValue: string | null
+  /** 五维项目画像 JSON 字符串（新版主字段） */
+  profile: string | null
   rawJson: string | null
   model: string | null
   tokensUsed: number

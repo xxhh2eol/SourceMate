@@ -35,6 +35,8 @@ export const projects = sqliteTable(
     cnSummary: text('cn_summary'),
     lastVersion: text('last_version'),
     lastCheckedAt: text('last_checked_at'),
+    // 是否存在用户尚未查看的新版本（检查更新时置 1，进详情/看版本后置 0）
+    hasUpdate: integer('has_update').notNull().default(0),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull()
   },
@@ -105,6 +107,8 @@ export const aiSummaries = sqliteTable(
     usage: text('usage'),
     techAnalysis: text('tech_analysis'),
     learningValue: text('learning_value'),
+    // 五维项目画像 JSON（定位/痛点/上手/时机/效果），升级版 ai_summaries 主字段
+    profile: text('profile'),
     rawJson: text('raw_json'),
     model: text('model'),
     tokensUsed: integer('tokens_used').notNull().default(0),
@@ -195,6 +199,24 @@ export const releaseAnalyses = sqliteTable(
   (t) => [uniqueIndex('release_analyses_project_version').on(t.projectId, t.version)]
 )
 
+/** 历史版本文件类型字典：本地规则 + AI 补全的结构化类型，去重后供全局过滤使用 */
+export const releaseFileTypes = sqliteTable(
+  'release_file_types',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    platform: text('platform').notNull().default('other'),
+    arch: text('arch'),
+    kind: text('kind').notNull().default('other'),
+    // 展示标签，优先与实际 note 一致（如「Windows x64 版本」），去重键
+    label: text('label').notNull(),
+    // 来源：rule 本地规则 / ai AI 补全
+    source: text('source').notNull().default('rule'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull()
+  },
+  (t) => [uniqueIndex('release_file_types_label_uniq').on(t.label)]
+)
+
 /** AI 调用使用统计（每次 chat 请求一条;模型统计页数据源） */
 export const aiUsageLogs = sqliteTable(
   'ai_usage_logs',
@@ -240,6 +262,34 @@ export const githubAccounts = sqliteTable('github_accounts', {
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull()
 })
+
+/** 预约任务（定时调度）：到达开始时间后自动入队对应分析任务 */
+export const scheduledTasks = sqliteTable(
+  'scheduled_tasks',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    projectId: integer('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    // type: ai_analysis（AI 标签分析）| readme_analyze（README 分析）
+    type: text('type').notNull(),
+    // 开始时间（ISO 字符串），到达后自动入队
+    startAt: text('start_at').notNull(),
+    // 结束时间（可选，不设为 null 表示无结束）
+    endAt: text('end_at'),
+    // 生命周期：pending 未开始 / running 执行中 / done 已完成 / failed 失败
+    status: text('status').notNull().default('pending'),
+    // 触发后对应的任务 id（执行中/完成溯源）
+    taskId: integer('task_id'),
+    // 是否启用（预留暂停能力）
+    enabled: integer('enabled').notNull().default(1),
+    createdAt: text('created_at').notNull()
+  },
+  (t) => [
+    index('scheduled_tasks_project_idx').on(t.projectId)
+    // 去重改为代码层校验「active（pending/running）」：完成/失败后允许重新预约
+  ]
+)
 
 // ---- 类型导出 ----
 export type Project = typeof projects.$inferSelect

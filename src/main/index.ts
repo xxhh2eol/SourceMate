@@ -1,7 +1,14 @@
 import { app, shell, BrowserWindow } from 'electron'
 import { join } from 'node:path'
 import { initDatabase } from './db'
+import { ensureReleaseFileTypesRebuilt } from './db/dao'
 import { registerIpcHandlers, startServices } from './ipc'
+import { stopAutoBackupScheduler } from './services/dataManager'
+import { startAutoUpdateChecker, stopAutoUpdateChecker } from './services/updateChecker'
+import {
+  startScheduledTaskScheduler,
+  stopScheduledTaskScheduler
+} from './services/scheduledTaskScheduler'
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -50,8 +57,12 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   initDatabase()
+  // 类型字典只在该版本首次启动时回填一次，之后启动直接跳过全量扫描
+  ensureReleaseFileTypesRebuilt()
   registerIpcHandlers()
   startServices()
+  startAutoUpdateChecker()
+  startScheduledTaskScheduler()
   // 注：系统字体读取（Local Font Access API）无需配置权限——经 Electron 43 实测，
   // queryLocalFonts 走权限 check 路径（默认放行），不经过 setPermissionRequestHandler
   createWindow()
@@ -64,4 +75,10 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', () => {
+  stopAutoBackupScheduler()
+  stopAutoUpdateChecker()
+  stopScheduledTaskScheduler()
 })

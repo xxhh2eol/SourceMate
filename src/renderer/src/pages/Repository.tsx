@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Alert,
-  Breadcrumb,
   Button,
   Card,
+  Dropdown,
   Empty,
   Layout,
   List,
   Menu,
+  Modal,
   Rate,
   Select,
   Spin,
   Table,
   Tag,
+  Tabs,
   Tooltip,
   Typography,
   Input,
@@ -32,13 +34,17 @@ import {
   TranslationOutlined,
   LinkOutlined,
   HistoryOutlined,
-  CopyOutlined
+  CopyOutlined,
+  AppstoreOutlined,
+  MenuOutlined,
+  ScheduleOutlined
 } from '@ant-design/icons'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import type { ColumnsType } from 'antd/es/table'
 import type {
   AiSummaryInfo,
+  ProjectProfile,
   ProjectWithTags,
   ReadmeAnalysisInfo,
   ReleaseAnalysisInfo,
@@ -49,6 +55,14 @@ import type {
 import MarkdownViewer from '../components/MarkdownViewer'
 import { formatCount, formatRelativeTime } from '../utils/format'
 import { cleanErrorMessage } from '../utils/error'
+import { splitReadmeSections } from '../utils/readmeSections'
+import { useSettingsStore, type ReadmeSectionLayout } from '../stores/settingsStore'
+import {
+  classifyReleaseFile
+  // 类型过滤暂时注释：恢复时取消下面这行
+  // releaseFileFilterLabel
+} from '@shared/releaseFileType'
+import { hasChineseReadme, hasEnglishReadme } from '@shared/readme'
 
 /** 标签来源徽标颜色：语言/话题/手动/AI */
 const TAG_SOURCE_COLOR: Record<TagSource, string> = {
@@ -59,8 +73,7 @@ const TAG_SOURCE_COLOR: Record<TagSource, string> = {
 }
 
 const TABS = [
-  // AI 摘要已暂停（README 优先），恢复时取消注释
-  // { key: 'summary', icon: <RobotOutlined /> },
+  { key: 'summary', icon: <RobotOutlined /> },
   { key: 'readme', icon: <FileTextOutlined /> },
   { key: 'releases', icon: <TagsOutlined /> },
   { key: 'versions', icon: <HistoryOutlined /> },
@@ -69,9 +82,7 @@ const TABS = [
 
 /** Repository 详情页（设计文档 §8）：二级导航 + 内容 tab（默认 README） */
 export default function Repository(): React.JSX.Element {
-  const { id, tab: rawTab = 'readme' } = useParams()
-  // AI 摘要已暂停：旧链接 /repository/:id/summary 统一落到 README
-  const tab = rawTab === 'summary' ? 'readme' : rawTab
+  const { id, tab = 'readme' } = useParams()
   const navigate = useNavigate()
   const { t } = useTranslation()
   const projectId = Number(id)
@@ -89,6 +100,8 @@ export default function Repository(): React.JSX.Element {
       ])
       setProject(p)
       setAllProjects(list)
+      // 进详情即视为「已查看」该项目的更新，清除可更新标记
+      if (p?.hasUpdate) void window.api.markUpdateSeen(projectId)
     } finally {
       setLoading(false)
     }
@@ -98,19 +111,118 @@ export default function Repository(): React.JSX.Element {
     void load()
   }, [load])
 
+  // topic 标签仅入库暂不展示（后续统一处理），三维 + 语言标签正常显示
+  const visibleProjectTags = useMemo(
+    () => (project?.tags ?? []).filter((t) => t.dimension !== 'topic'),
+    [project]
+  )
+
   return (
     <Layout style={{ height: '100%' }}>
       <Layout.Sider
         theme="light"
-        width={180}
-        style={{ borderRight: '1px solid rgba(0, 0, 0, 0.06)', overflow: 'auto' }}
+        width={240}
+        style={{ borderRight: '1px solid rgba(0, 0, 0, 0.06)', overflow: 'hidden' }}
       >
-        <Menu
-          mode="inline"
-          selectedKeys={[tab]}
-          onClick={({ key }) => navigate(`/repository/${id}/${key}`)}
-          items={TABS.map((tab) => ({ ...tab, label: t(`repository.${tab.key}`) }))}
-        />
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          <Menu
+            mode="inline"
+            selectedKeys={[tab]}
+            onClick={({ key }) => navigate(`/repository/${id}/${key}`)}
+            items={TABS.map((tab) => ({ ...tab, label: t(`repository.${tab.key}`) }))}
+            style={{ flexShrink: 0, borderInlineEnd: 'none' }}
+          />
+          {project && (
+            <>
+              {/* 标签区：占中间动态高度，可滚动；项目信息区固定在底部 */}
+              <div
+                style={{
+                  flex: 1,
+                  minHeight: 0,
+                  overflow: 'auto',
+                  padding: '12px 16px 8px'
+                }}
+              >
+                {visibleProjectTags.length > 0 ? (
+                  <div>
+                    {visibleProjectTags.map((t) => (
+                      <Tag
+                        key={t.id}
+                        color={TAG_SOURCE_COLOR[t.source]}
+                        style={t.status === 'candidate' ? { borderStyle: 'dashed' } : undefined}
+                      >
+                        {t.nameCn ?? t.name}
+                      </Tag>
+                    ))}
+                  </div>
+                ) : (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {t('repository.noTags')}
+                  </Typography.Text>
+                )}
+              </div>
+              {/* 项目信息区：固定底部 */}
+              <div
+                style={{
+                  flexShrink: 0,
+                  padding: '12px 16px 16px',
+                  borderTop: '1px solid rgba(0, 0, 0, 0.06)'
+                }}
+              >
+                <Typography.Text
+                  type="secondary"
+                  style={{ display: 'block', fontSize: 12, marginBottom: 8 }}
+                >
+                  {t('repository.projectInfo')}
+                </Typography.Text>
+                {/* 项目切换器：显示当前项目，下拉切换 */}
+                <Select
+                  style={{ width: '100%' }}
+                  size="small"
+                  value={projectId}
+                  showSearch
+                  optionFilterProp="label"
+                  onChange={(newId) => navigate(`/repository/${newId}/${tab}`)}
+                  options={allProjects.map((p) => ({ value: p.id, label: p.name }))}
+                />
+                <Typography.Link
+                  href={project.githubUrl}
+                  target="_blank"
+                  style={{
+                    display: 'block',
+                    marginTop: 8,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  {project.owner}/{project.repo} <LinkOutlined />
+                </Typography.Link>
+                <Space size={12} wrap style={{ margin: '10px 0 6px' }}>
+                  <span>
+                    <StarOutlined style={{ color: '#faad14', marginRight: 4 }} />
+                    {formatCount(project.starCount)}
+                  </span>
+                  <span>
+                    <ForkOutlined style={{ marginRight: 4 }} />
+                    {formatCount(project.forkCount)}
+                  </span>
+                  {project.language && (
+                    <Typography.Text type="secondary">{project.language}</Typography.Text>
+                  )}
+                  <Typography.Text type="secondary">
+                    {t('repository.updatedAt', { time: formatRelativeTime(project.updatedAt) })}
+                  </Typography.Text>
+                  {project.lastVersion && (
+                    <Tag color="blue">
+                      {t('repository.latestVersion', { version: project.lastVersion })}
+                    </Tag>
+                  )}
+                </Space>
+              </div>
+            </>
+          )}
+        </div>
       </Layout.Sider>
       <Layout.Content style={{ minWidth: 0, overflow: 'auto' }}>
         <div className="page-container">
@@ -120,77 +232,6 @@ export default function Repository(): React.JSX.Element {
             <Empty description={t('repository.notFound')} />
           ) : (
             <>
-              {/* 面包屑：首页列表入口 → 当前项目（IA 调整后列表统一在 Dashboard） */}
-              <Breadcrumb
-                style={{ marginBottom: 12 }}
-                items={[
-                  {
-                    title: (
-                      <a
-                        onClick={(e) => {
-                          e.preventDefault()
-                          navigate('/dashboard')
-                        }}
-                      >
-                        {t('repository.home')}
-                      </a>
-                    )
-                  },
-                  { title: project.name }
-                ]}
-              />
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
-                {/* 项目切换器：显示当前项目，下拉切换 */}
-                <Select
-                  style={{ minWidth: 180, maxWidth: 320 }}
-                  value={projectId}
-                  showSearch
-                  optionFilterProp="label"
-                  onChange={(newId) => navigate(`/repository/${newId}/${tab}`)}
-                  options={allProjects.map((p) => ({ value: p.id, label: p.name }))}
-                />
-                <Typography.Link href={project.githubUrl} target="_blank">
-                  {project.owner}/{project.repo} <LinkOutlined />
-                </Typography.Link>
-              </div>
-              <Space size={16} style={{ margin: '8px 0 4px' }}>
-                <span>
-                  <StarOutlined style={{ color: '#faad14', marginRight: 4 }} />
-                  {formatCount(project.starCount)}
-                </span>
-                <span>
-                  <ForkOutlined style={{ marginRight: 4 }} />
-                  {formatCount(project.forkCount)}
-                </span>
-                {project.language && (
-                  <Typography.Text type="secondary">{project.language}</Typography.Text>
-                )}
-                <Typography.Text type="secondary">
-                  {t('repository.updatedAt', { time: formatRelativeTime(project.updatedAt) })}
-                </Typography.Text>
-                {project.lastVersion && (
-                  <Tag color="blue">
-                    {t('repository.latestVersion', { version: project.lastVersion })}
-                  </Tag>
-                )}
-              </Space>
-              {project.tags.length > 0 && (
-                <div style={{ marginBottom: 12 }}>
-                  {/* topic 标签仅入库暂不展示（后续统一处理），三维 + 语言标签正常显示 */}
-                  {project.tags
-                    .filter((t) => t.dimension !== 'topic')
-                    .map((t) => (
-                      <Tag
-                        key={t.id}
-                        color={TAG_SOURCE_COLOR[t.source]}
-                        style={t.status === 'candidate' ? { borderStyle: 'dashed' } : undefined}
-                      >
-                        {t.nameCn ?? t.name}
-                      </Tag>
-                    ))}
-                </div>
-              )}
-
               {tab === 'summary' && <SummaryTab project={project} />}
               {tab === 'readme' && <ReadmeTab project={project} onReload={load} />}
               {tab === 'releases' && <ReleasesTab project={project} />}
@@ -204,12 +245,12 @@ export default function Repository(): React.JSX.Element {
   )
 }
 
-/** AI Summary：展示 AI 生成的分析（M4），未分析时可触发分析任务 */
+/** 五维项目画像：定位 / 痛点 / 上手 / 时机 / 效果（升级版 ai_summaries） */
 function SummaryTab({ project }: { project: ProjectWithTags }): React.JSX.Element {
   const { t } = useTranslation()
   const [summary, setSummary] = useState<AiSummaryInfo | null>(null)
   const [loading, setLoading] = useState(true)
-  const [enqueueing, setEnqueueing] = useState(false)
+  const [generating, setGenerating] = useState(false)
 
   const load = useCallback(async (): Promise<void> => {
     setSummary(await window.api.getAiSummary(project.id))
@@ -222,85 +263,160 @@ function SummaryTab({ project }: { project: ProjectWithTags }): React.JSX.Elemen
     return unsubscribe
   }, [load])
 
-  const startAnalysis = async (): Promise<void> => {
-    setEnqueueing(true)
+  const profile = useMemo<ProjectProfile | null>(() => {
+    if (!summary?.profile) return null
     try {
-      await window.api.enqueueAi(project.id)
-      message.info(t('repository.queued'))
+      return JSON.parse(summary.profile) as ProjectProfile
+    } catch {
+      return null
+    }
+  }, [summary])
+
+  const startGenerate = async (): Promise<void> => {
+    if (generating) return
+    setGenerating(true)
+    try {
+      await window.api.generateProfile(project.id)
+      await load()
     } catch (err) {
       message.warning(cleanErrorMessage(err))
     } finally {
-      setEnqueueing(false)
+      setGenerating(false)
     }
   }
 
   if (loading) return <Skeleton active style={{ marginTop: 12 }} />
 
-  if (!summary) {
+  if (!profile) {
     return (
-      <Card style={{ marginTop: 12 }} title={t('repository.summaryTitle')}>
-        <Empty>
+      <Card style={{ marginTop: 12 }} title={t('repository.profileTitle')}>
+        <Empty description={t('repository.profileEmpty')}>
           <Button
             type="primary"
             icon={<RobotOutlined />}
-            loading={enqueueing}
-            onClick={() => void startAnalysis()}
+            loading={generating}
+            onClick={() => void startGenerate()}
           >
-            {t('repository.startAnalysis')}
+            {t('repository.profileGenerate')}
           </Button>
         </Empty>
-        <Typography.Paragraph type="secondary" style={{ marginTop: 12, fontSize: 12 }}>
-          {t('repository.analysisTip')}
-        </Typography.Paragraph>
       </Card>
     )
   }
 
-  const learningValue = JSON.parse(summary.learningValue ?? '{}') as {
-    score?: number
-    reason?: string
-  }
+  const sections = [
+    { title: t('repository.profilePositioning'), content: profile.positioning, color: '#1677ff' },
+    { title: t('repository.profilePainPoints'), content: profile.painPoints, color: '#fa8c16' },
+    {
+      title: t('repository.profileGettingStarted'),
+      content: profile.gettingStarted,
+      color: '#52c41a'
+    }
+  ]
 
   return (
     <div style={{ marginTop: 12 }}>
-      <Space style={{ marginBottom: 8 }}>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+      <Card
+        title={t('repository.profileTitle')}
+        extra={
+          <Button
+            size="small"
+            icon={<RobotOutlined />}
+            loading={generating}
+            onClick={() => void startGenerate()}
+          >
+            {t('repository.profileRegenerate')}
+          </Button>
+        }
+      >
+        <Typography.Text
+          type="secondary"
+          style={{ fontSize: 12, display: 'block', marginBottom: 12 }}
+        >
           {t('repository.generated', {
-            model: summary.model ?? '-',
-            time: formatRelativeTime(summary.createdAt),
-            tokens: summary.tokensUsed
+            model: summary?.model ?? '-',
+            time: formatRelativeTime(summary?.createdAt ?? ''),
+            tokens: summary?.tokensUsed ?? 0
           })}
         </Typography.Text>
-        <Button
-          size="small"
-          icon={<RobotOutlined />}
-          loading={enqueueing}
-          onClick={() => void startAnalysis()}
-        >
-          {t('repository.reAnalyze')}
-        </Button>
-      </Space>
-      <Card>
-        <Typography.Title level={5} style={{ marginTop: 0 }}>
-          {t('repository.intro')}
-        </Typography.Title>
-        <Typography.Paragraph>{summary.intro}</Typography.Paragraph>
-        <Typography.Title level={5}>{t('repository.usage')}</Typography.Title>
-        <Typography.Paragraph>{summary.usage}</Typography.Paragraph>
-        <Typography.Title level={5}>{t('repository.techAnalysis')}</Typography.Title>
-        <Typography.Paragraph>{summary.techAnalysis}</Typography.Paragraph>
-        <Typography.Title level={5}>{t('repository.learningValue')}</Typography.Title>
-        <Typography.Paragraph>
-          <Rate disabled value={learningValue.score} />（{learningValue.score}/5）
-          <br />
-          <Typography.Text type="secondary">{learningValue.reason}</Typography.Text>
-        </Typography.Paragraph>
-        {project.description && (
-          <>
-            <Typography.Title level={5}>{t('repository.githubDesc')}</Typography.Title>
-            <Typography.Paragraph type="secondary">{project.description}</Typography.Paragraph>
-          </>
-        )}
+
+        {sections.map((s) => (
+          <div key={s.title} style={{ marginBottom: 16 }}>
+            <Typography.Title level={5} style={{ marginTop: 0 }}>
+              <span
+                style={{
+                  display: 'inline-block',
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: s.color,
+                  marginRight: 8
+                }}
+              />
+              {s.title}
+            </Typography.Title>
+            <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+              {s.content}
+            </Typography.Paragraph>
+          </div>
+        ))}
+
+        <div style={{ marginBottom: 16 }}>
+          <Typography.Title level={5} style={{ marginTop: 0 }}>
+            <span
+              style={{
+                display: 'inline-block',
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: '#13c2c2',
+                marginRight: 8
+              }}
+            />
+            {t('repository.profileWhen')}
+          </Typography.Title>
+          <Typography.Text strong style={{ color: '#52c41a' }}>
+            {t('repository.profileSuitable')}
+          </Typography.Text>
+          <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>
+            {profile.suitableScenarios}
+          </Typography.Paragraph>
+          <Typography.Text strong style={{ color: '#ff4d4f' }}>
+            {t('repository.profileUnsuitable')}
+          </Typography.Text>
+          <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+            {profile.unsuitableScenarios}
+          </Typography.Paragraph>
+        </div>
+
+        <div>
+          <Typography.Title level={5} style={{ marginTop: 0 }}>
+            <span
+              style={{
+                display: 'inline-block',
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: '#722ed1',
+                marginRight: 8
+              }}
+            />
+            {t('repository.profileEffect')}
+          </Typography.Title>
+          <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>
+            {profile.effect}
+          </Typography.Paragraph>
+          <Space align="center">
+            <Typography.Text strong>{t('repository.profileLearningValue')}</Typography.Text>
+            <Rate disabled value={profile.learningScore} />
+            <Typography.Text type="secondary">({profile.learningScore}/5)</Typography.Text>
+          </Space>
+          {profile.learningReason && (
+            <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
+              {profile.learningReason}
+            </Typography.Paragraph>
+          )}
+        </div>
       </Card>
     </div>
   )
@@ -318,6 +434,9 @@ function ReadmeTab({
   onReload: () => Promise<void>
 }): React.JSX.Element {
   const { t } = useTranslation()
+  const navigate = useNavigate()
+  const readmeSectionLayout = useSettingsStore((s) => s.readmeSectionLayout)
+  const setReadmeSectionLayout = useSettingsStore((s) => s.setReadmeSectionLayout)
   const [refreshing, setRefreshing] = useState(false)
   const [view, setView] = useState<ReadmeView>('en')
   const [analysis, setAnalysis] = useState<ReadmeAnalysisInfo | null>(null)
@@ -325,7 +444,7 @@ function ReadmeTab({
   const [translating, setTranslating] = useState(false)
 
   // 有中文版（真实或 AI 翻译）时默认展示中文，否则展示原始 README
-  const hasZhContent = Boolean(project.readmeZh || project.readmeZhAi)
+  const hasZhContent = hasChineseReadme(project)
   useEffect(() => {
     setView(hasZhContent ? 'zh' : 'en')
   }, [hasZhContent])
@@ -335,6 +454,24 @@ function ReadmeTab({
     view === 'zh'
       ? (project.readmeZh ?? project.readmeZhAi)
       : (project.readmeEn ?? project.readmeCache ?? project.readmeZh)
+
+  // 按 Markdown 标题分块：每个标题章节一个 Tab；无标题时回退整篇 README
+  const readmeSections = useMemo(
+    () => (content ? splitReadmeSections(content, t('repository.readmeOverview')) : []),
+    [content, t]
+  )
+  const [activeSection, setActiveSection] = useState<string>()
+  useEffect(() => {
+    setActiveSection(undefined)
+  }, [content])
+  const sectionItems = readmeSections.map((s) => ({
+    key: s.key,
+    label: s.title || t('repository.readme'),
+    children: <MarkdownViewer content={s.content} owner={project.owner} repo={project.repo} />
+  }))
+  const currentSection = sectionItems.some((item) => item.key === activeSection)
+    ? activeSection
+    : sectionItems[0]?.key
 
   // 分析按当前视图对应的语言读取/生成
   const analysisLang: 'zh' | 'en' = view === 'zh' ? 'zh' : 'en'
@@ -422,13 +559,11 @@ function ReadmeTab({
       />
       <Space style={{ marginBottom: 8 }} wrap>
         <Typography.Text type="secondary">{t('repository.readmeSource')}</Typography.Text>
-        {/* AI 翻译：无中文版 + 有英文版时提供（专注中文） */}
-        {!hasZhContent && Boolean(project.readmeEn) && (
+        {/* AI 翻译：无中文版 + 有英文源时提供（专注中文） */}
+        {!hasZhContent && hasEnglishReadme(project) && (
           <Tooltip
             title={
-              translating
-                ? t('repository.readmeTranslating')
-                : t('repository.readmeTranslateTip')
+              translating ? t('repository.readmeTranslating') : t('repository.readmeTranslateTip')
             }
           >
             <Button
@@ -454,6 +589,40 @@ function ReadmeTab({
         >
           {t('repository.reFetch')}
         </Button>
+        <Button
+          size="small"
+          icon={<ScheduleOutlined />}
+          onClick={() => navigate('/ai-center/schedule')}
+        >
+          {t('repository.scheduleReadme')}
+        </Button>
+        <Tooltip title={t('repository.readmeTabsTip')}>
+          <Dropdown
+            menu={{
+              selectedKeys: [readmeSectionLayout],
+              items: [
+                {
+                  key: 'single',
+                  icon: <MenuOutlined />,
+                  label: t('repository.readmeTabsSingle')
+                },
+                {
+                  key: 'wrap',
+                  icon: <AppstoreOutlined />,
+                  label: t('repository.readmeTabsWrap')
+                }
+              ],
+              onClick: ({ key }) => setReadmeSectionLayout(key as ReadmeSectionLayout)
+            }}
+          >
+            <Button size="small">
+              {readmeSectionLayout === 'single' ? <MenuOutlined /> : <AppstoreOutlined />}
+              {readmeSectionLayout === 'single'
+                ? t('repository.readmeTabsSingle')
+                : t('repository.readmeTabsWrap')}
+            </Button>
+          </Dropdown>
+        </Tooltip>
       </Space>
 
       {view === 'analysis' ? (
@@ -529,7 +698,18 @@ function ReadmeTab({
               </Tag>
             </div>
           )}
-          <MarkdownViewer content={content} owner={project.owner} repo={project.repo} />
+          {sectionItems.length > 1 ? (
+            <Tabs
+              size="small"
+              className={`readme-section-tabs${readmeSectionLayout === 'wrap' ? ' readme-tabs-wrap' : ''}`}
+              activeKey={currentSection}
+              onChange={setActiveSection}
+              items={sectionItems}
+              tabBarStyle={{ marginBottom: 12 }}
+            />
+          ) : (
+            <MarkdownViewer content={content} owner={project.owner} repo={project.repo} />
+          )}
         </Card>
       ) : (
         <Empty description={t('repository.readmeEmpty')} />
@@ -669,6 +849,7 @@ function ReleasesTab({ project }: { project: ProjectWithTags }): React.JSX.Eleme
                   content={r.body.slice(0, 4000)}
                   owner={project.owner}
                   repo={project.repo}
+                  compactImages
                 />
               </div>
             ) : (
@@ -684,29 +865,56 @@ function ReleasesTab({ project }: { project: ProjectWithTags }): React.JSX.Eleme
 /** 历史版本记录：每版本表头「分析」按钮，本地规则优先生成文件说明，AI 兜底补全 SHA-256 / 平台说明 */
 function VersionsTab({ project }: { project: ProjectWithTags }): React.JSX.Element {
   const { t } = useTranslation()
+  // 类型过滤暂时注释：恢复时取消下面两行
+  // const releaseFileTypeFilter = useSettingsStore((s) => s.releaseFileTypeFilter)
+  // const setReleaseFileTypeFilter = useSettingsStore((s) => s.setReleaseFileTypeFilter)
   const [analyses, setAnalyses] = useState<ReleaseAnalysisInfo[] | null>(null)
   const [rawReleases, setRawReleases] = useState<ReleaseInfo[]>([])
+  // const [fileTypes, setFileTypes] = useState<ReleaseFileTypeInfo[]>([])
   const [analyzingVersion, setAnalyzingVersion] = useState<string | null>(null)
 
   const load = useCallback((): void => {
-    // AI 分析结果 + 原始发布记录（含附件；进页面拉 API 并入库，失败返回本地缓存）
-    Promise.all([
-      window.api.listReleaseAnalyses(project.id),
-      window.api.getReleases(project.id)
-    ])
+    // AI 分析结果 + 原始发布记录（类型过滤暂注释）
+    Promise.all([window.api.listReleaseAnalyses(project.id), window.api.getReleases(project.id)])
       .then(([a, r]) => {
         setAnalyses(a)
         setRawReleases(r)
       })
-      .catch(() => setAnalyses([]))
+      .catch(() => {
+        setAnalyses([])
+      })
   }, [project.id])
 
   useEffect(() => {
     load()
   }, [load])
 
+  // 类型过滤暂注释：恢复时取消下面的过滤键清理 effect
+  // useEffect(() => {
+  //   if (fileTypes.length === 0) return
+  //   const validKeys = releaseFileTypeFilter.filter((key) =>
+  //     fileTypes.some((ft) => ft.label === key)
+  //   )
+  //   if (validKeys.length !== releaseFileTypeFilter.length) {
+  //     setReleaseFileTypeFilter(validKeys)
+  //   }
+  // }, [fileTypes, releaseFileTypeFilter, setReleaseFileTypeFilter])
+
   /** 只分析指定版本（结果覆盖写入） */
-  const analyzeOne = async (version: string): Promise<void> => {
+  const analyzeOne = async (version: string, alreadyAnalyzed: boolean): Promise<void> => {
+    if (alreadyAnalyzed) {
+      const confirmed = await new Promise<boolean>((resolve) => {
+        Modal.confirm({
+          title: t('repository.reanalyzeConfirmTitle'),
+          content: t('repository.reanalyzeConfirmContent'),
+          okText: t('repository.reanalyzeConfirmOk'),
+          cancelText: t('common.cancel'),
+          onOk: () => resolve(true),
+          onCancel: () => resolve(false)
+        })
+      })
+      if (!confirmed) return
+    }
     setAnalyzingVersion(version)
     try {
       await window.api.analyzeReleaseOne(project.id, version)
@@ -739,6 +947,56 @@ function VersionsTab({ project }: { project: ProjectWithTags }): React.JSX.Eleme
     })
   }, [analyses, rawReleases])
 
+  // 类型过滤暂时注释：恢复时取消下面的 fileTypeKey
+  // const fileTypeKey = (file: {
+  //   name: string
+  //   note?: string | null
+  //   platform?: string | null
+  //   kind?: string | null
+  // }): string => {
+  //   return releaseFileFilterLabel(file)
+  // }
+
+  /** 版本卡内的文件列表：已分析用结构化结果，未分析用文件名现场分类 */
+  const rowFiles = (row: {
+    analysis: ReleaseAnalysisInfo | null
+    raw: ReleaseInfo | null
+  }): ReleaseFileInfo[] => {
+    if (row.analysis) return row.analysis.files
+    return (row.raw?.assets ?? []).map((a) => {
+      const type = classifyReleaseFile(a.name, null)
+      return {
+        name: a.name,
+        sha256: a.sha256,
+        url: a.url,
+        note: '',
+        platform: type.platform,
+        arch: type.arch,
+        kind: type.kind
+      }
+    })
+  }
+
+  const visibleFiles = (row: {
+    analysis: ReleaseAnalysisInfo | null
+    raw: ReleaseInfo | null
+  }): ReleaseFileInfo[] => {
+    return rowFiles(row)
+  }
+
+  // 类型过滤暂时注释：恢复时取消下面的下拉菜单数据与可见版本过滤
+  // const typeMenuItems = [
+  //   ...fileTypes.map((ft) => ({
+  //     key: ft.label,
+  //     label: ft.label
+  //   })),
+  //   ...(fileTypes.length > 0 ? [{ type: 'divider' as const }] : []),
+  //   { key: '__clear__', label: t('repository.releaseTypeFilterClear') }
+  // ]
+  // const visibleVersionRows = versionRows.filter(
+  //   (row) => releaseFileTypeFilter.length === 0 || visibleFiles(row).length > 0
+  // )
+
   const copySha = async (value: string): Promise<void> => {
     try {
       await navigator.clipboard.writeText(value)
@@ -766,7 +1024,12 @@ function VersionsTab({ project }: { project: ProjectWithTags }): React.JSX.Eleme
                 {sha.slice(0, 16)}…
               </Typography.Text>
             </Tooltip>
-            <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => void copySha(sha)} />
+            <Button
+              size="small"
+              type="text"
+              icon={<CopyOutlined />}
+              onClick={() => void copySha(sha)}
+            />
           </Space>
         ) : (
           '-'
@@ -803,8 +1066,9 @@ function VersionsTab({ project }: { project: ProjectWithTags }): React.JSX.Eleme
       {versionRows.length === 0 ? (
         <Empty description={t('repository.versionsEmpty')} style={{ marginTop: 40 }} />
       ) : (
-        versionRows.map((row) =>
-          row.analysis ? (
+        versionRows.map((row) => {
+          const files = visibleFiles(row)
+          return row.analysis ? (
             <Card
               key={row.version}
               size="small"
@@ -833,7 +1097,7 @@ function VersionsTab({ project }: { project: ProjectWithTags }): React.JSX.Eleme
                     size="small"
                     icon={<RobotOutlined />}
                     loading={analyzingVersion === row.version}
-                    onClick={() => void analyzeOne(row.version)}
+                    onClick={() => void analyzeOne(row.version, true)}
                   >
                     {t('repository.analyze')}
                   </Button>
@@ -843,16 +1107,21 @@ function VersionsTab({ project }: { project: ProjectWithTags }): React.JSX.Eleme
               {row.analysis.descriptionZh || row.analysis.description ? (
                 <div>
                   {/* 发布说明为 AI 中文翻译版（原版为其他语言）时标记 */}
-                  {row.analysis.descriptionZh && row.analysis.description !== row.analysis.descriptionZh && (
-                    <Tag color="purple" style={{ marginBottom: 4 }}>
-                      {t('repository.releaseAiTranslated')}
-                    </Tag>
-                  )}
+                  {row.analysis.descriptionZh &&
+                    row.analysis.description !== row.analysis.descriptionZh && (
+                      <Tag color="purple" style={{ marginBottom: 4 }}>
+                        {t('repository.releaseAiTranslated')}
+                      </Tag>
+                    )}
                   <div className="markdown-body" style={{ marginBottom: 12 }}>
                     <MarkdownViewer
-                      content={(row.analysis.descriptionZh ?? row.analysis.description ?? '').slice(0, 4000)}
+                      content={(row.analysis.descriptionZh ?? row.analysis.description ?? '').slice(
+                        0,
+                        4000
+                      )}
                       owner={project.owner}
                       repo={project.repo}
+                      compactImages
                     />
                   </div>
                 </div>
@@ -861,7 +1130,7 @@ function VersionsTab({ project }: { project: ProjectWithTags }): React.JSX.Eleme
                 size="small"
                 rowKey="name"
                 pagination={false}
-                dataSource={row.analysis.files}
+                dataSource={files}
                 columns={fileColumns}
               />
             </Card>
@@ -888,7 +1157,7 @@ function VersionsTab({ project }: { project: ProjectWithTags }): React.JSX.Eleme
                   type="primary"
                   icon={<RobotOutlined />}
                   loading={analyzingVersion === row.version}
-                  onClick={() => void analyzeOne(row.version)}
+                  onClick={() => void analyzeOne(row.version, false)}
                 >
                   {t('repository.analyze')}
                 </Button>
@@ -898,17 +1167,12 @@ function VersionsTab({ project }: { project: ProjectWithTags }): React.JSX.Eleme
                 size="small"
                 rowKey="name"
                 pagination={false}
-                dataSource={(row.raw?.assets ?? []).map((a) => ({
-                  name: a.name,
-                  sha256: a.sha256,
-                  url: a.url,
-                  note: ''
-                }))}
+                dataSource={files}
                 columns={fileColumns}
               />
             </Card>
           )
-        )
+        })
       )}
     </div>
   )

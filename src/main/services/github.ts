@@ -116,7 +116,12 @@ async function throwAuthError(res: Response): Promise<never> {
 /** 验证 token 并获取账号信息（GET /user，200 = token 有效） */
 export async function fetchCurrentUser(
   token?: string
-): Promise<{ login: string; name: string | null; avatarUrl: string | null; scopes: string | null }> {
+): Promise<{
+  login: string
+  name: string | null
+  avatarUrl: string | null
+  scopes: string | null
+}> {
   const res = await request('/user', token)
   if (res.status === 401 || res.status === 403) {
     await throwAuthError(res)
@@ -126,7 +131,11 @@ export async function fetchCurrentUser(
       msg(`GitHub API 错误：HTTP ${res.status}`, `GitHub API error: HTTP ${res.status}`)
     )
   }
-  const j = (await res.json()) as { login?: string; name?: string | null; avatar_url?: string | null }
+  const j = (await res.json()) as {
+    login?: string
+    name?: string | null
+    avatar_url?: string | null
+  }
   return {
     login: j.login ?? '',
     name: j.name ?? null,
@@ -303,17 +312,26 @@ const README_LANG_CANDIDATES = [
 
 /**
  * 启发式语言检测：剔除 HTML 标签 / markdown 链接 / 代码块 / 表格符号等噪声后，
- * 中文字符 + 中文标点加权占比 > 15% 视为中文（纯字符占比会被双语混杂 README 稀释，如 HTML 头部 + 中文正文）。
+ * 中文字符 + 中文标点加权占比 > 15% 且中文字符数达到最小阈值时视为中文
+ * （纯字符占比会被双语混杂 README 稀释，如 HTML 头部 + 中文正文；最小阈值避免
+ * 「本文档见英文版」这类一句占位 README 被当作完整中文版）。
+ *
+ * 清洗顺序固定为「代码块 → HTML → 链接」：顺序不能反——代码块里的 heredoc
+ * （如 `python - <<'PY'`）会被 HTML 正则误判为标签起始，一路匹配到正文中下一个 `>`，
+ * 把代码块闭合围栏和大段中文一并吞掉；HTML 正则也限定为 `<` 后紧跟字母/斜杠的真实标签，避免 `<<` 误伤。
  */
+const MIN_ZH_CHARS = 20
+
 function detectReadmeLang(text: string): 'zh' | 'en' {
   const cleaned = text
-    .replace(/<[^>]*>/g, '')
-    .replace(/\[[^\]]*\]\([^)]*\)/g, '')
     .replace(/```[\s\S]*?```/g, '')
+    .replace(/<\/?[a-zA-Z][^>]*>/gi, '')
+    .replace(/\[[^\]]*\]\([^)]*\)/g, '')
     .replace(/[#*|`>\-=_\s]/g, '')
   const zhChars = (cleaned.match(/[\u4e00-\u9fff]/g) ?? []).length
   const zhPunct = (cleaned.match(/[，。、；：？！「」『』]/g) ?? []).length
-  return (zhChars + zhPunct * 2) / Math.max(cleaned.length, 1) > 0.15 ? 'zh' : 'en'
+  const ratio = (zhChars + zhPunct * 2) / Math.max(cleaned.length, 1)
+  return ratio > 0.15 && zhChars >= MIN_ZH_CHARS ? 'zh' : 'en'
 }
 
 /**
@@ -369,11 +387,11 @@ export async function fetchReadmes(
       break
     }
   }
-  // 从主 README 的语言切换链接中提取中文版路径（如 [简体中文](README-zh.md) / docs/...），
-  // 确定性解析，不依赖 AI；覆盖固定命名之外的各种变体
+  // 从主 README 的语言切换链接中提取中文/英文版路径（如 [简体中文](README-zh.md) /
+  // [English](docs/en/README.md)），确定性解析，不依赖 AI；覆盖固定命名之外的各种变体
   if (primaryText) {
     const linked = extractLangReadmeLinks(primaryText)
-    for (const path of linked) {
+    for (const path of [...linked.zh, ...linked.en]) {
       const text = await tryFetch(path)
       if (text) absorb(text)
     }
@@ -385,22 +403,27 @@ export async function fetchReadmes(
   }
   // 全空且出现过网络/服务端错误：视为拉取失败（而非仓库无 README），交由调用方决定是否保留缓存
   if (!result.en && !result.zh && sawError) {
-    throw new Error(msg('README 拉取失败（网络或服务端错误）', 'Failed to fetch README (network or server error)'))
+    throw new Error(
+      msg('README 拉取失败（网络或服务端错误）', 'Failed to fetch README (network or server error)')
+    )
   }
   return result
 }
 
 /** 链接文字中出现这些词即视为「指向中文文档」的语言切换链接 */
-const CHINESE_LINK_TEXT = /(中文|简体|繁体|簡體|繁體|汉语|漢語|中文版|中文文档|中文文檔|国语|國語|国文|國文)/i
+const CHINESE_LINK_TEXT =
+  /(中文|简体|繁体|簡體|繁體|汉语|漢語|中文版|中文文档|中文文檔|国语|國語|国文|國文)/i
+/** 链接文字中出现这些词即视为「指向英文文档」的语言切换链接 */
+const ENGLISH_LINK_TEXT = /(English|英文|英語|英文版|英文文档|英文文檔)/i
 
 /**
- * 从 README 的语言切换链接中提取「中文优先」的 README 相对路径。
+ * 从 README 的语言切换链接中提取中文 / 英文 README 相对路径。
  * 同时解析 Markdown 链接 [text](path) 与 HTML <a href="path">text</a>（GitHub 双语 README 常用）。
- * 判定：链接文字含中文语言词（如「中文」「简体中文」），或路径含 zh/cn/hans 关键词；
- * 路径为其他语言（ja/ko/ru/...）或英文变体时排除。
+ * 判定优先级：链接文字（中文词 / 英文词）→ 路径关键词（zh/cn/hans 或 en）；
+ * 其他语言（ja/ko/ru/...）路径排除。
  */
-function extractLangReadmeLinks(readme: string): string[] {
-  const links: string[] = []
+function extractLangReadmeLinks(readme: string): { zh: string[]; en: string[] } {
+  const result: { zh: string[]; en: string[] } = { zh: [], en: [] }
   const pairs: Array<[string, string]> = []
   // Markdown 链接
   const mdRe = /\[([^\]]*)\]\(([^)\s]+)\)/g
@@ -416,15 +439,25 @@ function extractLangReadmeLinks(readme: string): string[] {
     const path = rawPath.split('#')[0]
     if (!/\.(md|markdown)$/i.test(path)) continue // 只看文档链接
     if (/^https?:\/\//i.test(path)) continue // 跳过绝对 URL
+    if (OTHER_LANG.test(path)) continue // 跳过其他语言版本
     const isChineseText = CHINESE_LINK_TEXT.test(text)
+    const isEnglishText = ENGLISH_LINK_TEXT.test(text)
     const isChinesePath = /(^|\/)[^/]*(zh|cn|hans)[^/]*\.(md|markdown)$/i.test(path)
-    const isEnglishPath = /(^|\/)en[-_.]|[-_.]en\./i.test(path)
-    const isOtherLang = OTHER_LANG.test(path)
-    if ((isChineseText || isChinesePath) && !isEnglishPath && !isOtherLang) {
-      if (!links.includes(path)) links.push(path)
-    }
+    const isEnglishPath = /(^|\/)[^/]*\ben[^/]*\.(md|markdown)$/i.test(path)
+    // 文字判定优先；文字无明确语言时退回路径关键词
+    const lang =
+      isChineseText && !isEnglishText
+        ? 'zh'
+        : isEnglishText && !isChineseText
+          ? 'en'
+          : isChinesePath && !isEnglishPath
+            ? 'zh'
+            : isEnglishPath
+              ? 'en'
+              : null
+    if (lang && !result[lang].includes(path)) result[lang].push(path)
   }
-  return links
+  return result
 }
 
 /**
@@ -432,12 +465,15 @@ function extractLangReadmeLinks(readme: string): string[] {
  * README 拉取失败（网络/服务端错误导致全部为空）时抛错，不写任何 README 字段，
  * 保留已有缓存避免数据丢失；仓库确实无 README（全部 404）时才清空语言缓存。
  */
-export async function syncProjectReadme(project: {
-  id: number
-  owner: string
-  repo: string
-  readmeCache: string | null
-}, token?: string): Promise<void> {
+export async function syncProjectReadme(
+  project: {
+    id: number
+    owner: string
+    repo: string
+    readmeCache: string | null
+  },
+  token?: string
+): Promise<void> {
   const meta = await fetchRepoMeta(project.owner, project.repo, token)
   updateProjectMeta(project.id, {
     name: meta.name,
@@ -467,6 +503,7 @@ export async function syncProjectReadme(project: {
     readmeEn?: string | null
     readmeZh?: string | null
     readmeZhAi?: string | null
+    readmeAiModel?: string | null
   } = {
     // 显式写入（含 null），修正语言分类后清掉旧字段残留
     readmeEn: readmes.en,
@@ -478,7 +515,10 @@ export async function syncProjectReadme(project: {
     readmePatch.readmeCache = readmes.zh
   }
   // 已有真实中文版时，清理历史 AI 翻译残留（页面优先展示真实中文；旧翻译可能基于误判内容）
-  if (readmes.zh) readmePatch.readmeZhAi = null
+  if (readmes.zh) {
+    readmePatch.readmeZhAi = null
+    readmePatch.readmeAiModel = null
+  }
   if (Object.keys(readmePatch).length > 0) updateProjectMeta(project.id, readmePatch)
 }
 

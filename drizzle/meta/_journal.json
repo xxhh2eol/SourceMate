@@ -106,6 +106,48 @@
       "when": 1786269538670,
       "tag": "0014_merge_case_duplicate_tags",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1786629930675,
+      "tag": "0015_brown_charles_xavier",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1786630832423,
+      "tag": "0016_needy_revanche",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1786842158192,
+      "tag": "0017_ai_summaries_profile",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1786854245415,
+      "tag": "0018_projects_has_update",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1786854857624,
+      "tag": "0019_scheduled_tasks",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1786891815486,
+      "tag": "0020_scheduled_tasks_status",
+      "breakpoints": true
     }
   ]
 }

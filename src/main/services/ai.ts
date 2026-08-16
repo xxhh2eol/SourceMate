@@ -2,10 +2,21 @@ import { getSetting, hasSetting, setSetting, logAiUsage } from '../db/dao'
 import { httpFetch } from './network'
 import { decryptSecret, encryptSecret } from './secret'
 import { msg } from '../msg'
-import type { ProjectWithTags, ReleaseFileInfo } from '../../shared/types'
+import type { ProjectWithTags, ProjectProfile, ReleaseFileInfo } from '../../shared/types'
+import { getEnglishReadmeSource } from '../../shared/readme'
 import type { ReleaseData } from './github'
 import { inferReleaseFileNote } from './releaseFileNote'
 import { truncateReadme } from './readmeTruncate'
+import {
+  PROJECT_PROFILE_SYSTEM_PROMPT,
+  buildProjectProfileUserPrompt
+} from './prompts/projectProfilePrompt'
+import {
+  classifyReleaseFile,
+  normalizeArch,
+  normalizeKind,
+  normalizePlatform
+} from '../../shared/releaseFileType'
 
 /**
  * AI 服务（设计文档 §6）
@@ -352,6 +363,69 @@ ${readme || '（无）'}
   return { ...result, tokens, model: config.model }
 }
 
+// ---- 五维项目画像（恢复并升级 ai_summaries） ----
+
+/** 解析 AI 输出的五维画像 JSON，宽松兜底（字段缺失留空、评分夹到 1-5） */
+export function normalizeProjectProfile(raw: unknown): ProjectProfile {
+  const j = (raw ?? {}) as Record<string, unknown>
+  const score = Number(j.learning_score)
+  const learningScore =
+    Number.isFinite(score) && score > 0 ? Math.min(5, Math.max(1, Math.round(score))) : 3
+  return {
+    positioning: String(j.positioning ?? '').trim(),
+    painPoints: String(j.pain_points ?? '').trim(),
+    gettingStarted: String(j.getting_started ?? '').trim(),
+    suitableScenarios: String(j.suitable_scenarios ?? '').trim(),
+    unsuitableScenarios: String(j.unsuitable_scenarios ?? '').trim(),
+    effect: String(j.effect ?? '').trim(),
+    learningScore,
+    learningReason: String(j.learning_reason ?? '').trim()
+  }
+}
+
+/** 生成五维项目画像（定位/痛点/上手/时机/效果），结果中文 */
+export async function analyzeProjectProfile(
+  project: ProjectWithTags
+): Promise<{ profile: ProjectProfile; tokens: number; model: string }> {
+  const config = getModelConfig()
+  if (!hasModelConfig(config)) {
+    throw new Error(
+      msg(
+        '未配置 AI 模型，请先在 设置 → 模型配置 中配置',
+        'AI model not configured. Please configure it in Settings → Model Configuration.'
+      )
+    )
+  }
+
+  // 与标签/README 分析共用关键段落截断，避免长尾内容全量发给 AI
+  const readme = truncateReadme(
+    project.readmeCache ?? project.readmeEn ?? project.readmeZh ?? '',
+    8000
+  )
+  const userPrompt = buildProjectProfileUserPrompt({
+    name: project.name,
+    url: project.githubUrl,
+    description: project.description,
+    language: project.language,
+    topics: project.topics,
+    stars: project.starCount,
+    forks: project.forkCount,
+    readme
+  })
+
+  const { content, tokens } = await chat(
+    config,
+    [
+      { role: 'system', content: PROJECT_PROFILE_SYSTEM_PROMPT },
+      { role: 'user', content: userPrompt }
+    ],
+    true,
+    'project_summary'
+  )
+  const profile = normalizeProjectProfile(extractJson(content))
+  return { profile, tokens, model: config.model }
+}
+
 const README_TRANSLATE_SYSTEM = `你是专业的 GitHub README 翻译。将用户提供的英文 README 翻译为简体中文。
 
 要求：
@@ -387,7 +461,7 @@ async function doTranslateReadme(
   }
 
   // 完整翻译：尽量覆盖整份 README（上限放宽到 2 万字符，超出部分由模型尽力处理）
-  const source = (project.readmeEn ?? project.readmeCache ?? '').slice(0, 20000)
+  const source = getEnglishReadmeSource(project).slice(0, 20000)
   if (!source) throw new Error(msg('没有可翻译的英文 README', 'No English README to translate'))
 
   const { content, tokens } = await chat(
@@ -433,11 +507,15 @@ const RELEASE_ANALYSIS_SYSTEM = `你是软件发布信息整理助手。下面�
 任务：
 1. 将每个版本的发布说明 description 翻译为简体中文（若原文已是简体中文则原样保留），存入 descriptionZh；翻译要完整覆盖原文要点，保留 Markdown 结构。
 2. 对 sha256 为 null 的文件，尽力从该版本的发布说明中提取其 SHA-256（通常形如 "SHA256: xxxx"、"sha256sum xxxx"、"xxxx  <文件名>"）；确实找不到则为 null。
-3. 对 note 为 null 的文件，生成一行简短的中文说明 note：说明这是哪个平台的版本（如 Linux x64 版本、Windows x64 版本、Windows arm64 版本、macOS arm64 版本、源代码压缩包），依据文件名、扩展名与发布说明推断；文件名无法明确判断平台的写"安装包"或"附件"，严禁臆造文件名不支持的平台。
+3. 对 note 为 null 的文件，生成一行简短的中文说明 note（如 Linux x64 版本、Windows arm64 版本、macOS 安装包、源代码压缩包），并同时输出结构化字段：
+   - platform：平台小写键，优先使用 windows / macos / linux / android / ios / freebsd / chromeos；遇到规则外的新平台可写简短小写英文键，无法判断写 other
+   - arch：架构小写键，优先使用 x64 / arm64 / x86 / arm32 / universal / riscv64 / loongarch64；无法判断写 other
+   - kind：包类型小写键，优先使用 installer / source / checksum / signature；遇到规则外的新包类型可写简短小写英文键，无法判断写 other
+   文件名无法明确判断平台的 platform 写 other，严禁臆造文件名不支持的平台。
 4. 输出必须包含输入中的所有版本，顺序不变，且每个版本都必须输出 version 与 descriptionZh；files 只输出需要补全的文件项（sha256 或 note 原本为 null 的文件），不需要补全的文件不要输出；没有需要补全的文件时 files 可为空数组或省略。
 
 只输出一个合法的 JSON 数组，不要 markdown 代码块、不要任何其他文字：
-[{"version": "...", "descriptionZh": "...", "files": [{"name": "...", "sha256": "..."或null, "note": "..."}]}]`
+[{"version": "...", "descriptionZh": "...", "files": [{"name": "...", "sha256": "..."或null, "note": "...", "platform": "windows", "arch": "x64", "kind": "installer"}]}]`
 
 /** 解析 AI 输出的 JSON 数组（去代码块 → 直接解析 → 提取片段 → 尾逗号 / 截断修复） */
 function extractJsonArray(text: string): unknown {
@@ -483,9 +561,7 @@ function extractJsonArray(text: string): unknown {
  * AI 分析版本发布记录：翻译版本说明为中文；本地规则无法推断说明或 API 缺少 SHA-256 的文件才交给 AI。
  * 返回与 releases 对应的版本列表（仅含至少有一个文件的版本）。
  */
-export async function analyzeReleaseVersions(
-  releases: ReleaseData[]
-): Promise<{
+export async function analyzeReleaseVersions(releases: ReleaseData[]): Promise<{
   result: Array<{ version: string; descriptionZh: string | null; files: ReleaseFileInfo[] }>
   tokens: number
   model: string
@@ -567,18 +643,23 @@ export async function analyzeReleaseVersions(
     const ai = aiByVersion.get(release.tagName)
     if (!ai) continue
     const aiFiles = Array.isArray(ai.files)
-      ? ai.files.filter(
-          (f): f is Record<string, unknown> => !!f && typeof f === 'object'
-        )
+      ? ai.files.filter((f): f is Record<string, unknown> => !!f && typeof f === 'object')
       : []
     const files: ReleaseFileInfo[] = release.assets.slice(0, 15).map((a) => {
       const aiFile = aiFiles.find((f) => String(f.name) === a.name)
       const localNote = inferReleaseFileNote(a.name)
+      const localType = classifyReleaseFile(a.name)
       return {
         name: a.name,
         sha256: a.sha256 ?? (aiFile?.sha256 ? String(aiFile.sha256) : null),
         url: a.downloadUrl,
-        note: localNote ?? (aiFile?.note ? String(aiFile.note).trim() : '')
+        note: localNote ?? (aiFile?.note ? String(aiFile.note).trim() : ''),
+        platform:
+          localType.platform ??
+          normalizePlatform(aiFile?.platform ? String(aiFile.platform) : null) ??
+          null,
+        arch: localType.arch ?? normalizeArch(aiFile?.arch ? String(aiFile.arch) : null) ?? null,
+        kind: localType.kind ?? normalizeKind(aiFile?.kind ? String(aiFile.kind) : null) ?? null
       }
     })
     result.push({
@@ -596,7 +677,12 @@ export async function testAiConnection(
   config: AiModelConfig
 ): Promise<{ ok: boolean; message: string }> {
   try {
-    const { content } = await chat(config, [{ role: 'user', content: '只回复 OK 两个字母' }], false, 'test_connection')
+    const { content } = await chat(
+      config,
+      [{ role: 'user', content: '只回复 OK 两个字母' }],
+      false,
+      'test_connection'
+    )
     return {
       ok: true,
       message: msg(

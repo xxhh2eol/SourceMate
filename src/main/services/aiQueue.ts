@@ -6,10 +6,12 @@ import {
   getTaskById,
   listPendingTasks,
   resetStuckRunningTasks,
-  updateProjectMeta,
+  saveProjectProfile,
+  saveReadmeAnalysis,
+  updateScheduledTaskStatusByTaskId,
   updateTask
 } from '../db/dao'
-import { hasModelConfig, translateReadme } from './ai'
+import { analyzeProjectProfile, analyzeReadme } from './ai'
 import { runTagAnalysis } from './tagAnalysis'
 import { syncProjectReadme } from './github'
 import { msg } from '../msg'
@@ -21,9 +23,8 @@ import type { TaskRow } from '../db/dao'
  * - 幂等入队由 DAO 层保证（同项目同类型仅一条 active）
  * - 完成/失败后广播 task:progress 供渲染进程刷新
  * - 任务类型：
- *   - readme_sync：拉取多语言 README；只有英文且无中文版时，AI 完整翻译为中文
+ *   - readme_sync：拉取多语言 README（按语言检测归类入库）；翻译由详情页手动按钮触发
  *   - tag_analysis：README 同步 + AI 标签三环节（结构化分析 → 归一化匹配 → 候选判断）
- *     （已暂停入队：用户暂时取消 AI 标签功能，仅保留 language/topics 物化；恢复时改回 ipc.ts 入队类型）
  */
 
 const DEFAULT_CONCURRENCY = 3
@@ -93,31 +94,50 @@ async function processTask(task: TaskRow): Promise<void> {
       console.log(
         `[aiQueue] tag analysis #${task.projectId}: raw=${r.rawCount} written=${r.writtenCount} candidates=${r.candidateCount} merged=${r.mergedCount} rejected=${r.rejectedCount}`
       )
-    } else {
-      // readme_sync：只有英文且无任何中文版（真实或已有翻译）时，AI 完整翻译为中文
+      // 3. 五维项目画像：批量分析时自动生成（失败不阻断标签分析，仅记日志，可到详情页手动重试）
+      markTask(task.id, { status: 'running', progress: 85 })
       const fresh = getProjectById(task.projectId)
-      if (fresh && (fresh.readmeEn || fresh.readmeCache) && !fresh.readmeZh && !fresh.readmeZhAi) {
-        markTask(task.id, { status: 'running', progress: 60 })
-        if (hasModelConfig()) {
-          const { text, tokens, model } = await translateReadme(fresh)
-          updateProjectMeta(fresh.id, { readmeZhAi: text, readmeAiModel: model })
+      if (fresh) {
+        try {
+          const { profile, tokens, model } = await analyzeProjectProfile(fresh)
+          saveProjectProfile(fresh.id, profile, model, tokens)
           console.log(
-            `[aiQueue] translated README for #${fresh.id} (${fresh.owner}/${fresh.repo}) ${tokens} tokens via ${model}`
+            `[aiQueue] project profile #${fresh.id} (${fresh.owner}/${fresh.repo}) ${tokens} tokens via ${model}`
           )
-        } else {
-          // 未配置模型：跳过翻译（拉取本身不依赖 AI）
-          console.log(`[aiQueue] no model configured, skip translation for #${fresh.id}`)
+        } catch (err) {
+          console.warn(
+            `[aiQueue] project profile failed for #${fresh.id}: ${err instanceof Error ? err.message : String(err)}`
+          )
         }
       }
+    } else if (task.type === 'readme_analyze') {
+      // README 分析：README 已在第 1 步同步，直接生成中文分析
+      markTask(task.id, { status: 'running', progress: 60 })
+      const fresh = getProjectById(task.projectId)
+      if (fresh) {
+        const { overview, keyPoints, tokens, model } = await analyzeReadme(fresh, 'zh')
+        saveReadmeAnalysis({
+          projectId: fresh.id,
+          language: 'zh',
+          overview,
+          keyPoints: JSON.stringify(keyPoints),
+          rawJson: null,
+          model,
+          tokensUsed: tokens
+        })
+      }
     }
+    // readme_sync：仅同步多语言 README（已在第 1 步完成）；翻译为详情页手动按钮触发
 
     // 成功：清空 error（避免成功行残留失败原因红字）
     markTask(task.id, { status: 'done', progress: 100, error: null })
+    updateScheduledTaskStatusByTaskId(task.id, 'done')
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     const current = getTaskById(task.id)
     if (current && current.retryCount >= MAX_ATTEMPTS - 1) {
       markTask(task.id, { status: 'failed', error: message })
+      updateScheduledTaskStatusByTaskId(task.id, 'failed')
     } else {
       // 重试：重新入队（幂等由 pending 状态保证），记录失败原因
       markTask(task.id, {

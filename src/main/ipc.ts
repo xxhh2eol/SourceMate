@@ -3,11 +3,14 @@ import { msg } from './msg'
 import { normalizeTagName } from './services/tagNormalize'
 import {
   assignTag,
+  clearCompletedScheduledTasks,
   createGithubAccount,
   createProject,
+  createScheduledTask,
   deleteGithubAccount,
   deleteOrphanTags,
   deleteProject,
+  deleteScheduledTask,
   enqueueTask,
   getGithubAccountById,
   getGithubTokenEnc,
@@ -28,19 +31,26 @@ import {
   getAiUsageSeriesByModel,
   getAiUsageSummary,
   listGithubAccounts,
+  listReleaseFileTypes,
   listProjectsWithSummaries,
   listProjectsWithTags,
   listReleaseAnalyses,
   listReleases,
+  listScheduledTasks,
   listTags,
   listTasks,
+  listUpdatableProjects,
+  markUpdateSeen,
   migrateLegacyGithubToken,
   removeTag,
   saveNote,
+  saveProjectProfile,
   saveReadmeAnalysis,
   saveReleaseAnalysis,
+  syncReleaseFileTypes,
   updateGithubAccount,
   updateProjectMeta,
+  updateScheduledTask,
   upsertReleases
 } from './db/dao'
 import {
@@ -56,7 +66,9 @@ import {
   syncProjectReadme
 } from './services/github'
 import type { ReleaseData } from './services/github'
+import { checkAllProjectsUpdates } from './services/updateChecker'
 import {
+  analyzeProjectProfile,
   analyzeReadme,
   analyzeReleaseVersions,
   deleteModelProfile,
@@ -70,28 +82,29 @@ import {
   type ModelProfile,
   type ModelProfileView
 } from './services/ai'
-import {
-  getLatestSummary,
-  isQueuePaused,
-  setQueuePaused,
-  startQueue
-} from './services/aiQueue'
+import { getLatestSummary, isQueuePaused, setQueuePaused, startQueue } from './services/aiQueue'
 import { getSetting, setSetting, updateTask } from './db/dao'
 import { httpFetch, toProxyRules, type ProxyConfig } from './services/network'
 import { decryptSecret, encryptSecret } from './services/secret'
 import {
-  autoBackup,
   backupDatabase,
+  getBackupSettings,
+  listBackupFiles,
   openBackupsDir,
+  restartAutoBackupScheduler,
+  saveBackupSettings,
+  startAutoBackupScheduler,
   restoreDatabase
 } from './services/dataManager'
 import {
   AI_TAG_ANALYSIS_ENABLED,
   type AddProjectResult,
+  type AutoBackupSettings,
   type GithubAccountView,
   type ProjectWithTags,
   type ReleaseFileInfo,
   type ReleaseInfo,
+  type ScheduledTaskType,
   type StarredImportAccountResult,
   type StarredImportProgress,
   type TagDimension
@@ -240,11 +253,13 @@ export function registerIpcHandlers(): void {
     if (!project) throw new Error(msg('项目不存在', 'Project not found'))
 
     const latest = await fetchLatestVersion(project.owner, project.repo)
+    const hasUpdate = latest !== null && latest !== project.lastVersion
     updateProjectMeta(id, {
       lastVersion: latest,
-      lastCheckedAt: new Date().toISOString()
+      lastCheckedAt: new Date().toISOString(),
+      ...(hasUpdate ? { hasUpdate: 1 } : {})
     })
-    return { latest, hasUpdate: latest !== null && latest !== project.lastVersion }
+    return { latest, hasUpdate }
   })
 
   // 批量检查：并发 5，结果汇总；逐项目广播进度（渲染层驱动边框流光动效）
@@ -254,36 +269,16 @@ export function registerIpcHandlers(): void {
         event.sender.send('update:progress', { projectId, status })
       }
     }
-    const projects = listProjectsWithTags()
-    const results: Array<{ id: number; name: string; latest: string | null; hasUpdate: boolean }> =
-      []
-    const workers = Math.min(5, projects.length)
-    let cursor = 0
-
-    const work = async (): Promise<void> => {
-      while (true) {
-        const idx = cursor++
-        if (idx >= projects.length) return
-        const p = projects[idx]
-        send(p.id, 'checking')
-        try {
-          const latest = await fetchLatestVersion(p.owner, p.repo)
-          updateProjectMeta(p.id, { lastVersion: latest, lastCheckedAt: new Date().toISOString() })
-          results.push({
-            id: p.id,
-            name: p.name,
-            latest,
-            hasUpdate: latest !== null && latest !== p.lastVersion
-          })
-        } catch {
-          results.push({ id: p.id, name: p.name, latest: null, hasUpdate: false })
-        }
-        send(p.id, 'done')
-      }
-    }
-
-    await Promise.all(Array.from({ length: workers }, () => work()))
+    const results = await checkAllProjectsUpdates(send)
     return { results, checked: results.length }
+  })
+
+  // 「可更新」列表 + 标记已查看
+  ipcMain.handle('project:listUpdatable', () => listUpdatableProjects())
+
+  ipcMain.handle('project:markUpdateSeen', (_e, projectId: number) => {
+    markUpdateSeen(projectId)
+    return { ok: true }
   })
 
   // 导入所选账号的 star 项目（设置页触发）：逐账号两步——元数据落库（拉取中）→ 补全 README（处理中）
@@ -520,6 +515,7 @@ export function registerIpcHandlers(): void {
             model,
             tokensUsed: tokens
           })
+          syncReleaseFileTypes(v.files)
         }
       } catch (err) {
         // AI 超时（版本较多或模型响应慢）：版本记录已落库，重试只分析未完成的版本
@@ -577,7 +573,10 @@ export function registerIpcHandlers(): void {
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
         throw new Error(
-          msg('AI 分析超时（模型响应慢），请重试', 'AI analysis timed out (slow model). Please retry.'),
+          msg(
+            'AI 分析超时（模型响应慢），请重试',
+            'AI analysis timed out (slow model). Please retry.'
+          ),
           { cause: err }
         )
       }
@@ -597,7 +596,14 @@ export function registerIpcHandlers(): void {
       model,
       tokensUsed: tokens
     })
+    syncReleaseFileTypes(result.files)
     return listReleaseAnalyses(projectId)
+  })
+
+  // ---- 历史版本文件类型字典（全局过滤下拉） ----
+
+  ipcMain.handle('releaseTypes:list', () => {
+    return listReleaseFileTypes()
   })
 
   // ---- 标签 ----
@@ -666,6 +672,22 @@ export function registerIpcHandlers(): void {
     return { queued, taskIds }
   })
 
+  // 按项目 id × 任务类型批量入队（AI 分析页「分析选中」弹窗可勾选 AI 分析 / README 分析）
+  ipcMain.handle('ai:enqueueManyTypes', (_e, ids: number[], types: string[]) => {
+    let queued = 0
+    const taskIds: number[] = []
+    for (const id of ids) {
+      for (const type of types) {
+        const task = enqueueTask(id, type)
+        if (task) {
+          queued++
+          taskIds.push(task.id)
+        }
+      }
+    }
+    return { queued, taskIds }
+  })
+
   ipcMain.handle('ai:retry', (_e, taskId: number) => {
     // 手动重试 = 全新一次尝试：清错误与自动重试计数（retryCount 仅统计自动重试）
     updateTask(taskId, { status: 'pending', error: null, retryCount: 0 })
@@ -680,6 +702,48 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('ai:getPaused', () => isQueuePaused())
 
   ipcMain.handle('ai:getSummary', (_e, projectId: number) => getLatestSummary(projectId))
+
+  // 生成五维项目画像（详情页「项目画像」手动触发）
+  ipcMain.handle('ai:generateProfile', async (_e, projectId: number) => {
+    const project = getProjectById(projectId)
+    if (!project) throw new Error(msg('项目不存在', 'Project not found'))
+    const { profile, tokens, model } = await analyzeProjectProfile(project)
+    saveProjectProfile(projectId, profile, model, tokens)
+    return getLatestSummary(projectId)
+  })
+
+  // ---- 预约任务（定时调度） ----
+
+  ipcMain.handle('schedule:list', () => listScheduledTasks())
+
+  ipcMain.handle(
+    'schedule:create',
+    (
+      _e,
+      input: { projectId: number; type: ScheduledTaskType; startAt: string; endAt: string | null }
+    ) => {
+      createScheduledTask(input.projectId, input.type, input.startAt, input.endAt)
+      return listScheduledTasks()
+    }
+  )
+
+  ipcMain.handle('schedule:delete', (_e, id: number) => {
+    deleteScheduledTask(id)
+    return listScheduledTasks()
+  })
+
+  ipcMain.handle(
+    'schedule:update',
+    (_e, input: { id: number; projectId: number; startAt: string }) => {
+      updateScheduledTask(input.id, input.projectId, input.startAt)
+      return listScheduledTasks()
+    }
+  )
+
+  ipcMain.handle('schedule:clearCompleted', () => {
+    clearCompletedScheduledTasks()
+    return listScheduledTasks()
+  })
 
   // ---- 应用自身更新检查（About 页）：对比本地版本与 GitHub Releases 最新版本 ----
 
@@ -698,7 +762,10 @@ export function registerIpcHandlers(): void {
       }
       return { ok: true, current, latest, hasUpdate: compareVersions(current, latest) < 0 }
     } catch {
-      return { ok: false, error: msg('查询失败，请稍后再试', 'Query failed. Please try again later.') }
+      return {
+        ok: false,
+        error: msg('查询失败，请稍后再试', 'Query failed. Please try again later.')
+      }
     }
   })
 
@@ -728,29 +795,20 @@ export function registerIpcHandlers(): void {
     return dimension as 'year' | 'month' | 'day'
   }
 
-  ipcMain.handle(
-    'usage:stats',
-    (
-      _e,
-      dimension: string,
-      model: string | null
-    ) => {
-      const valid = validateUsageDimension(dimension)
-      return {
-        series: getAiUsageSeries(valid, model),
-        seriesByModel: getAiUsageSeriesByModel(valid),
-        byModel: getAiUsageByModel(),
-        byFunction: getAiUsageByFunction(),
-        summary: getAiUsageSummary(model)
-      }
+  ipcMain.handle('usage:stats', (_e, dimension: string, model: string | null) => {
+    const valid = validateUsageDimension(dimension)
+    return {
+      series: getAiUsageSeries(valid, model),
+      seriesByModel: getAiUsageSeriesByModel(valid),
+      byModel: getAiUsageByModel(),
+      byFunction: getAiUsageByFunction(),
+      summary: getAiUsageSummary(model)
     }
-  )
+  })
 
   // 单次请求明细（分页，默认按开始时间倒序）
-  ipcMain.handle(
-    'usage:logs',
-    (_e, model: string | null, page: number, pageSize: number) =>
-      getAiUsageLogPage(model, page, pageSize)
+  ipcMain.handle('usage:logs', (_e, model: string | null, page: number, pageSize: number) =>
+    getAiUsageLogPage(model, page, pageSize)
   )
 
   // ---- 多模型管理（M5+）：列表 / 保存 / 删除 / 默认 / 开关 ----
@@ -790,7 +848,12 @@ export function registerIpcHandlers(): void {
     async (_e, input: { alias?: string; token: string }): Promise<GithubAccountView> => {
       const token = input.token.trim()
       if (!token) throw new Error(msg('请输入 GitHub Token', 'Please enter a GitHub Token.'))
-      let info: { login: string; name: string | null; avatarUrl: string | null; scopes: string | null }
+      let info: {
+        login: string
+        name: string | null
+        avatarUrl: string | null
+        scopes: string | null
+      }
       try {
         info = await fetchCurrentUser(token)
       } catch (err) {
@@ -978,14 +1041,15 @@ export function registerIpcHandlers(): void {
    */
   ipcMain.handle(
     'settings:testConnection',
-    async (_e, testProxy?: ProxyConfig): Promise<{
+    async (
+      _e,
+      testProxy?: ProxyConfig
+    ): Promise<{
       ok: boolean
       level: 'success' | 'warning' | 'error'
       message: string
     }> => {
-      const proxy = testProxy
-        ? { ...testProxy, host: (testProxy.host ?? '').trim() }
-        : undefined
+      const proxy = testProxy ? { ...testProxy, host: (testProxy.host ?? '').trim() } : undefined
       if (proxy?.enabled && (!proxy.host || !proxy.port)) {
         const invalid = msg('请填写代理地址和端口', 'Enter proxy host and port')
         return { ok: false, level: 'warning', message: invalid }
@@ -1000,8 +1064,7 @@ export function registerIpcHandlers(): void {
         }
         return checkGithubReachability()
       } catch (err) {
-        const message =
-          err instanceof Error ? err.message : msg('连接失败', 'Connection failed')
+        const message = err instanceof Error ? err.message : msg('连接失败', 'Connection failed')
         return { ok: false, level: 'error', message }
       } finally {
         try {
@@ -1042,6 +1105,27 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('data:openBackupsDir', () => openBackupsDir())
+
+  // ---- 自动备份任务（设置 / 备份文件列表 / 目录选择） ----
+
+  ipcMain.handle('backup:settings:get', () => getBackupSettings())
+
+  ipcMain.handle('backup:settings:save', (_e, input: AutoBackupSettings) => {
+    const r = saveBackupSettings(input)
+    if (r.ok) restartAutoBackupScheduler()
+    return r
+  })
+
+  ipcMain.handle('backup:files:list', () => listBackupFiles())
+
+  ipcMain.handle('backup:dir:pick', async () => {
+    const result = await dialog.showOpenDialog({
+      title: '选择备份目录',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true }
+    return { ok: true, path: result.filePaths[0] }
+  })
 }
 
 /** 启动时：应用代理配置 + 自动备份 + 启动 AI 任务队列 */
@@ -1056,6 +1140,6 @@ export function startServices(): void {
     appliedProxy = { proxyRules: toProxyRules(proxy) }
     void session.defaultSession.setProxy(appliedProxy).catch(() => undefined)
   }
-  autoBackup()
+  startAutoBackupScheduler()
   startQueue()
 }

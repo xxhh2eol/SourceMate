@@ -5,6 +5,7 @@ import type { TagDimension } from '@shared/types'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 export type AppLanguage = 'zh-CN' | 'en-US'
+export type ReadmeSectionLayout = 'single' | 'wrap'
 
 /** 侧栏钉住的分类项：一级 = 整个维度组（如「语言」）；二级 = 具体标签 */
 export interface PinnedCategory {
@@ -35,6 +36,10 @@ interface SettingsState {
   pinnedCategories: PinnedCategory[]
   /** 项目卡片/表格行配色模式：彩色（按项目名淡色相）| 黑白（默认白底） */
   projectColorMode: 'color' | 'mono'
+  /** README 章节 Tab 布局：单行（溢出进「更多」）| 多行（全部换行排列） */
+  readmeSectionLayout: ReadmeSectionLayout
+  /** 历史版本文件类型全局过滤（键为 platform:kind；空数组 = 全部） */
+  releaseFileTypeFilter: string[]
   /** UI 字体（null = 系统默认） */
   uiFontFamily: string | null
   /** Markdown 正文字体（null = 系统默认） */
@@ -47,6 +52,8 @@ interface SettingsState {
   setPrimaryColor: (color: string) => void
   togglePinCategory: (pin: PinnedCategory) => void
   setProjectColorMode: (mode: 'color' | 'mono') => void
+  setReadmeSectionLayout: (mode: ReadmeSectionLayout) => void
+  setReleaseFileTypeFilter: (keys: string[]) => void
   setUiFontFamily: (family: string | null) => void
   setMarkdownFontFamily: (family: string | null) => void
   /** 枚举系统字体并更新缓存（懒加载：首次打开字体选择器时调用） */
@@ -70,6 +77,8 @@ export const useSettingsStore = create<SettingsState>()(
       primaryColor: PRESET_COLORS[0],
       pinnedCategories: [],
       projectColorMode: 'color',
+      readmeSectionLayout: 'single',
+      releaseFileTypeFilter: [],
       uiFontFamily: null,
       markdownFontFamily: null,
       fontList: null,
@@ -85,6 +94,8 @@ export const useSettingsStore = create<SettingsState>()(
         }))
       },
       setProjectColorMode: (projectColorMode) => set({ projectColorMode }),
+      setReadmeSectionLayout: (readmeSectionLayout) => set({ readmeSectionLayout }),
+      setReleaseFileTypeFilter: (releaseFileTypeFilter) => set({ releaseFileTypeFilter }),
       setUiFontFamily: (uiFontFamily) => set({ uiFontFamily }),
       setMarkdownFontFamily: (markdownFontFamily) => set({ markdownFontFamily }),
       refreshFontList: async () => {
@@ -108,6 +119,8 @@ export const useSettingsStore = create<SettingsState>()(
               primaryColor?: string
               pinnedCategories?: unknown
               projectColorMode?: 'color' | 'mono'
+              readmeSectionLayout?: ReadmeSectionLayout
+              releaseFileTypeFilter?: string[]
               uiFontFamily?: string | null
               markdownFontFamily?: string | null
             }
@@ -128,6 +141,10 @@ export const useSettingsStore = create<SettingsState>()(
             ? (s.pinnedCategories as PinnedCategory[])
             : [],
           projectColorMode: s?.projectColorMode ?? 'color',
+          readmeSectionLayout: s?.readmeSectionLayout ?? 'single',
+          releaseFileTypeFilter: Array.isArray(s?.releaseFileTypeFilter)
+            ? s.releaseFileTypeFilter
+            : [],
           uiFontFamily: s?.uiFontFamily ?? null,
           markdownFontFamily: s?.markdownFontFamily ?? null
         }
@@ -139,6 +156,8 @@ export const useSettingsStore = create<SettingsState>()(
         primaryColor: s.primaryColor,
         pinnedCategories: s.pinnedCategories,
         projectColorMode: s.projectColorMode,
+        readmeSectionLayout: s.readmeSectionLayout,
+        releaseFileTypeFilter: s.releaseFileTypeFilter,
         uiFontFamily: s.uiFontFamily,
         markdownFontFamily: s.markdownFontFamily
       })

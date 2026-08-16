@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   Checkbox,
+  DatePicker,
   message,
   Modal,
   notification,
@@ -27,9 +28,18 @@ import {
   ThunderboltOutlined
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import type { CandidateTagView, ProjectWithTags, TagDimension, TaskItem } from '@shared/types'
+import dayjs, { type Dayjs } from 'dayjs'
+import type {
+  CandidateTagView,
+  ProjectWithTags,
+  ScheduledTaskInfo,
+  ScheduledTaskStatus,
+  ScheduledTaskType,
+  TagDimension,
+  TaskItem
+} from '@shared/types'
 import { formatRelativeTime } from '../utils/format'
 import { cleanErrorMessage } from '../utils/error'
 import { analysisStatusOf, type AnalysisStatus } from '../utils/analysisStatus'
@@ -107,6 +117,8 @@ interface ProjectRow extends ProjectWithTags {
   lastSyncAt: string | null
   /** 最近一次历史版本分析使用的模型（「使用模型」列回退来源之一） */
   lastReleaseModel: string | null
+  /** 是否存在未开始的预约任务 */
+  scheduled: boolean
 }
 
 /** 「上次分析」时间：优先 AI 摘要生成时间（旧功能），否则用最近完成的分析任务时间 */
@@ -130,6 +142,210 @@ function sortByAnalyzed(list: ProjectRow[]): ProjectRow[] {
     if (atA && !atB) return 1
     return (atB ?? '').localeCompare(atA ?? '')
   })
+}
+
+/** 绝对时间展示（预约任务的开始/结束时间） */
+function formatDateTime(v: string | null): string {
+  if (!v) return '—'
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return v
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+const SCHEDULE_STATUS_META: Record<ScheduledTaskStatus, { color: string; labelKey: string }> = {
+  pending: { color: 'processing', labelKey: 'aiCenter.scheduleStatusPending' },
+  running: { color: 'gold', labelKey: 'aiCenter.scheduleStatusRunning' },
+  done: { color: 'success', labelKey: 'aiCenter.scheduleStatusDone' },
+  failed: { color: 'error', labelKey: 'aiCenter.scheduleStatusFailed' }
+}
+
+/** 预约任务（计划页）：任务列表；未开始可取消/编辑，执行中与已完成留存记录 */
+function ScheduleSection(): React.JSX.Element {
+  const { t } = useTranslation()
+  const [schedules, setSchedules] = useState<ScheduledTaskInfo[]>([])
+  const [projects, setProjects] = useState<ProjectWithTags[]>([])
+  const [loading, setLoading] = useState(true)
+  // 编辑弹窗
+  const [editing, setEditing] = useState<ScheduledTaskInfo | null>(null)
+  const [editProjectId, setEditProjectId] = useState<number | undefined>()
+  const [editStartAt, setEditStartAt] = useState<Dayjs | null>(null)
+  const [saving, setSaving] = useState(false)
+  // 列表列宽（表头拖拽调整，会话内生效）
+  const [colWidths, setColWidths] = useState<Record<string, number>>({})
+
+  const load = useCallback(async (): Promise<void> => {
+    const [s, p] = await Promise.all([window.api.listScheduledTasks(), window.api.listProjects()])
+    setSchedules(s)
+    setProjects(p)
+    setLoading(false)
+  }, [])
+
+  useEffect(() => {
+    void load()
+    const unsubscribe = window.api.onTaskProgress(() => void load())
+    return unsubscribe
+  }, [load])
+
+  const remove = async (id: number): Promise<void> => {
+    setSchedules(await window.api.deleteScheduledTask(id))
+  }
+
+  const clearCompleted = async (): Promise<void> => {
+    setSchedules(await window.api.clearCompletedScheduledTasks())
+    message.success(t('aiCenter.clearCompletedDone'))
+  }
+
+  const openEdit = (row: ScheduledTaskInfo): void => {
+    setEditing(row)
+    setEditProjectId(row.projectId)
+    setEditStartAt(dayjs(row.startAt))
+  }
+
+  const saveEdit = async (): Promise<void> => {
+    if (!editing || !editProjectId || !editStartAt) {
+      message.warning(t('aiCenter.scheduleRequired'))
+      return
+    }
+    setSaving(true)
+    try {
+      setSchedules(
+        await window.api.updateScheduledTask({
+          id: editing.id,
+          projectId: editProjectId,
+          startAt: editStartAt.toISOString()
+        })
+      )
+      setEditing(null)
+    } catch (err) {
+      message.warning(cleanErrorMessage(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const columns: ColumnsType<ScheduledTaskInfo> = [
+    {
+      title: t('aiCenter.scheduleProject'),
+      dataIndex: 'projectName',
+      ellipsis: true,
+      width: colWidths.projectName ?? 220,
+      onHeaderCell: () =>
+        ({
+          width: colWidths.projectName ?? 220,
+          onResize: (w: number) => setColWidths((s) => ({ ...s, projectName: w }))
+        }) as React.HTMLAttributes<HTMLTableCellElement>
+    },
+    {
+      title: t('aiCenter.scheduleType'),
+      dataIndex: 'type',
+      width: colWidths.type ?? 120,
+      onHeaderCell: () =>
+        ({
+          width: colWidths.type ?? 120,
+          onResize: (w: number) => setColWidths((s) => ({ ...s, type: w }))
+        }) as React.HTMLAttributes<HTMLTableCellElement>,
+      render: (v: ScheduledTaskType) =>
+        v === 'ai_analysis' ? t('aiCenter.scheduleTypeAi') : t('aiCenter.scheduleTypeReadme')
+    },
+    {
+      title: t('aiCenter.scheduleStart'),
+      dataIndex: 'startAt',
+      width: colWidths.startAt ?? 150,
+      onHeaderCell: () =>
+        ({
+          width: colWidths.startAt ?? 150,
+          onResize: (w: number) => setColWidths((s) => ({ ...s, startAt: w }))
+        }) as React.HTMLAttributes<HTMLTableCellElement>,
+      render: (v: string) => formatDateTime(v)
+    },
+    {
+      title: t('aiCenter.scheduleStatus'),
+      dataIndex: 'status',
+      width: colWidths.status ?? 96,
+      onHeaderCell: () =>
+        ({
+          width: colWidths.status ?? 96,
+          onResize: (w: number) => setColWidths((s) => ({ ...s, status: w }))
+        }) as React.HTMLAttributes<HTMLTableCellElement>,
+      render: (v: ScheduledTaskStatus) => (
+        <Tag color={SCHEDULE_STATUS_META[v].color}>{t(SCHEDULE_STATUS_META[v].labelKey)}</Tag>
+      )
+    },
+    {
+      title: '',
+      key: 'action',
+      width: 130,
+      render: (_, row) =>
+        row.status === 'pending' ? (
+          <Space size={0}>
+            <Button size="small" type="link" onClick={() => openEdit(row)}>
+              {t('aiCenter.scheduleEdit')}
+            </Button>
+            <Popconfirm
+              title={t('aiCenter.scheduleDeleteTip')}
+              onConfirm={() => void remove(row.id)}
+            >
+              <Button size="small" danger type="link">
+                {t('aiCenter.scheduleDelete')}
+              </Button>
+            </Popconfirm>
+          </Space>
+        ) : null
+    }
+  ]
+
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <Button onClick={() => void clearCompleted()}>{t('aiCenter.clearCompleted')}</Button>
+      </div>
+      <Table<ScheduledTaskInfo>
+        rowKey="id"
+        loading={loading}
+        columns={columns}
+        dataSource={schedules}
+        components={{ header: { cell: ResizableTitle } }}
+        pagination={false}
+        size="small"
+        locale={{ emptyText: t('aiCenter.scheduleEmpty') }}
+      />
+
+      <Modal
+        open={editing !== null}
+        title={t('aiCenter.scheduleEdit')}
+        okText={t('common.confirm')}
+        cancelText={t('common.cancel')}
+        confirmLoading={saving}
+        onOk={() => void saveEdit()}
+        onCancel={() => setEditing(null)}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <div>
+            <Typography.Text strong>{t('aiCenter.scheduleProject')}</Typography.Text>
+            <Select<number>
+              showSearch
+              optionFilterProp="label"
+              style={{ width: '100%', marginTop: 6 }}
+              value={editProjectId}
+              onChange={setEditProjectId}
+              options={projects.map((p) => ({ value: p.id, label: p.name }))}
+            />
+          </div>
+          <div>
+            <Typography.Text strong>{t('aiCenter.scheduleStart')}</Typography.Text>
+            <DatePicker
+              showTime={{ format: 'HH:mm' }}
+              format="YYYY-MM-DD HH:mm"
+              style={{ width: '100%', marginTop: 6 }}
+              value={editStartAt}
+              onChange={setEditStartAt}
+            />
+          </div>
+        </Space>
+      </Modal>
+    </>
+  )
 }
 
 /**
@@ -157,12 +373,25 @@ export default function AICenter(): React.JSX.Element {
   const batchRef = useRef<{ ids: Set<number> } | null>(null)
   // 候选标签数（候选 tab 徽标；任务完成时随 refresh 更新）
   const [candidateCount, setCandidateCount] = useState(0)
-  // 当前 tab（批次完成通知可切到候选）
-  const [activeTab, setActiveTab] = useState('projects')
+  // 当前 tab（批次完成通知可切到候选）；支持 /ai-center/:tab 深链（如 /ai-center/schedule）
+  const { tab: urlTab } = useParams()
+  const [activeTab, setActiveTab] = useState(
+    urlTab === 'schedule' || urlTab === 'tasks' || urlTab === 'candidates' ? urlTab : 'projects'
+  )
+  // 添加计划任务弹窗（项目 tab 勾选后弹出）
+  const [scheduleOpen, setScheduleOpen] = useState(false)
+  const [scheduleTypes, setScheduleTypes] = useState<ScheduledTaskType[]>(['ai_analysis'])
+  const [scheduleStartAt, setScheduleStartAt] = useState<Dayjs | null>(null)
+  const [scheduleCreating, setScheduleCreating] = useState(false)
+  // 计划任务创建后自增，触发「预约任务」tab 重新加载
+  const [scheduleVersion, setScheduleVersion] = useState(0)
+  // 分析选中弹窗（可勾选 AI 分析 / README 分析）
+  const [analyzeOpen, setAnalyzeOpen] = useState(false)
+  const [analyzeTypes, setAnalyzeTypes] = useState<string[]>(['tag_analysis'])
 
-  /** 本次入队的任务全部进入终态（done/failed）时，弹一次结果汇总 */
+  /** 本次入队的任务全部进入终态（done/failed）时，弹一次结果汇总；有候选标签才显示「去审核」 */
   const checkBatchDone = useCallback(
-    (list: TaskItem[]): void => {
+    (list: TaskItem[], candidateCount: number): void => {
       const batch = batchRef.current
       if (!batch || batch.ids.size === 0) return
       const byId = new Map(list.map((t) => [t.id, t]))
@@ -177,25 +406,31 @@ export default function AICenter(): React.JSX.Element {
       batchRef.current = null
       notification.info({
         message: t('aiCenter.batchDoneTitle'),
-        description: t('aiCenter.batchDoneDesc', { done, failed }),
+        description: t(
+          candidateCount > 0 ? 'aiCenter.batchDoneDescCandidates' : 'aiCenter.batchDoneDesc',
+          { done, failed }
+        ),
         placement: 'bottomRight',
         duration: 8,
-        btn: (
-          <Button
-            size="small"
-            type="primary"
-            onClick={() => {
-              // 切换到候选 tab 并滚动到候选表格
-              setActiveTab('candidates')
-              setTimeout(() => {
-                document.getElementById('candidate-section')?.scrollIntoView({ behavior: 'smooth' })
-              }, 100)
-              notification.destroy()
-            }}
-          >
-            {t('aiCenter.viewCandidates')}
-          </Button>
-        )
+        btn:
+          candidateCount > 0 ? (
+            <Button
+              size="small"
+              type="primary"
+              onClick={() => {
+                // 切换到候选 tab 并滚动到候选表格
+                setActiveTab('candidates')
+                setTimeout(() => {
+                  document
+                    .getElementById('candidate-section')
+                    ?.scrollIntoView({ behavior: 'smooth' })
+                }, 100)
+                notification.destroy()
+              }}
+            >
+              {t('aiCenter.viewCandidates')}
+            </Button>
+          ) : undefined
       })
     },
     [t]
@@ -216,7 +451,7 @@ export default function AICenter(): React.JSX.Element {
       setProjects(rows)
       setHasModel(hm)
       setCandidateCount(cands.length)
-      checkBatchDone(list)
+      checkBatchDone(list, cands.length)
       setSelectedIds((prev) => {
         // 已分析完成的项目自动取消勾选（避免重复分析）
         const analyzed = new Set(rows.filter((r) => lastAnalyzedAt(r)).map((r) => r.id))
@@ -292,29 +527,69 @@ export default function AICenter(): React.JSX.Element {
     })
   }
 
-  const analyzeSelected = async (): Promise<void> => {
-    if (selectedIds.size === 0) return
-    Modal.confirm({
-      title: t('aiCenter.confirmTitle', { count: selectedIds.size }),
-      content: t('aiCenter.confirmContent'),
-      okText: t('aiCenter.confirmOk'),
-      cancelText: t('common.cancel'),
-      onOk: async () => {
-        setBusy(true)
-        try {
-          const r = await window.api.enqueueAiMany([...selectedIds])
-          if (r.taskIds.length > 0) {
-            batchRef.current = { ids: new Set(r.taskIds) }
+  /** 「分析选中」弹窗确认：按勾选类型批量入队 */
+  const runAnalyzeSelected = async (): Promise<void> => {
+    if (selectedIds.size === 0 || analyzeTypes.length === 0) return
+    setBusy(true)
+    try {
+      const r = await window.api.enqueueAiManyTypes([...selectedIds], analyzeTypes)
+      if (r.taskIds.length > 0) {
+        batchRef.current = { ids: new Set(r.taskIds) }
+      }
+      message.success(t('aiCenter.queued', { count: r.queued }))
+      setAnalyzeOpen(false)
+      await refresh()
+    } catch (err) {
+      message.warning(cleanErrorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 为当前勾选的项目批量添加计划任务（弹窗确认） */
+  const createSchedules = async (): Promise<void> => {
+    if (selectedIds.size === 0 || scheduleTypes.length === 0 || !scheduleStartAt) {
+      message.warning(t('aiCenter.scheduleRequired'))
+      return
+    }
+    setScheduleCreating(true)
+    try {
+      let ok = 0
+      let dup = 0
+      for (const id of selectedIds) {
+        for (const type of scheduleTypes) {
+          try {
+            await window.api.createScheduledTask({
+              projectId: id,
+              type,
+              startAt: scheduleStartAt.toISOString(),
+              endAt: null
+            })
+            ok++
+          } catch {
+            dup++
           }
-          message.success(t('aiCenter.queued', { count: r.queued }))
-          await refresh()
-        } catch (err) {
-          message.warning(cleanErrorMessage(err))
-        } finally {
-          setBusy(false)
         }
       }
-    })
+      message.success(t('aiCenter.scheduleCreated', { ok }))
+      if (dup > 0) message.warning(t('aiCenter.scheduleDup', { dup }))
+      setScheduleOpen(false)
+      setScheduleStartAt(null)
+      setScheduleTypes(['ai_analysis'])
+      // 添加完毕后取消勾选并刷新「已预约」状态
+      setSelectedIds(new Set())
+      setScheduleVersion((v) => v + 1)
+      await refresh()
+    } finally {
+      setScheduleCreating(false)
+    }
+  }
+
+  /** 清空已结束（done / failed）的预约任务记录 */
+  const clearCompleted = async (): Promise<void> => {
+    await window.api.clearCompletedScheduledTasks()
+    message.success(t('aiCenter.clearCompletedDone'))
+    setScheduleVersion((v) => v + 1)
   }
 
   const togglePause = async (): Promise<void> => {
@@ -355,8 +630,7 @@ export default function AICenter(): React.JSX.Element {
     (p) => analysisStatusOf(p, tasks) === 'none'
   )
   const allUnanalyzedSelected =
-    currentPageUnanalyzed.length > 0 &&
-    currentPageUnanalyzed.every((p) => selectedIds.has(p.id))
+    currentPageUnanalyzed.length > 0 && currentPageUnanalyzed.every((p) => selectedIds.has(p.id))
 
   const toggleUnanalyzedOnPage = (): void => {
     setSelectedIds((prev) => {
@@ -421,6 +695,7 @@ export default function AICenter(): React.JSX.Element {
         )
         return (
           <Space size={4}>
+            {p.scheduled && <Tag color="processing">{t('aiCenter.scheduled')}</Tag>}
             <Tag color={meta.color}>{t(meta.labelKey)}</Tag>
             {lowConfidence && (
               <Tooltip title={t('aiCenter.lowConfidenceTip')}>
@@ -485,7 +760,9 @@ export default function AICenter(): React.JSX.Element {
             ? t('aiCenter.taskTagAnalysis')
             : type === 'update_check'
               ? t('aiCenter.taskUpdateCheck')
-              : type
+              : type === 'readme_analyze'
+                ? t('aiCenter.taskReadmeAnalyze')
+                : type
     },
     {
       title: t('aiCenter.colStatus'),
@@ -591,9 +868,7 @@ export default function AICenter(): React.JSX.Element {
             label: t('aiCenter.tabProjects'),
             children: (
               <>
-                <div
-                  style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}
-                >
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
                   <Space>
                     {/* 选中/释放当前页全部未分析项目（随分页大小变化，不跨页） */}
                     <Button
@@ -612,15 +887,26 @@ export default function AICenter(): React.JSX.Element {
                       icon={<ThunderboltOutlined />}
                       loading={busy}
                       disabled={selectedIds.size === 0}
-                      onClick={() => void analyzeSelected()}
+                      onClick={() => setAnalyzeOpen(true)}
                     >
                       {t('aiCenter.analyzeSelected', { count: selectedIds.size })}
+                    </Button>
+                    <Button disabled={selectedIds.size === 0} onClick={() => setScheduleOpen(true)}>
+                      {t('aiCenter.addSchedule')}
+                    </Button>
+                    <Button onClick={() => void clearCompleted()}>
+                      {t('aiCenter.clearCompleted')}
                     </Button>
                   </Space>
                 </div>
                 {/* 未配置模型时显示配置引导；已配置默认模型后隐藏 */}
                 {!hasModel && (
-                  <Alert type="info" showIcon message={t('aiCenter.tip')} style={{ marginBottom: 16 }} />
+                  <Alert
+                    type="info"
+                    showIcon
+                    message={t('aiCenter.tip')}
+                    style={{ marginBottom: 16 }}
+                  />
                 )}
                 {/* 项目勾选管理：未分析默认勾选、排序在前；仅项目名可点击进详情 */}
                 <Table<ProjectRow>
@@ -683,9 +969,89 @@ export default function AICenter(): React.JSX.Element {
               </Badge>
             ),
             children: <CandidateSection onCountChange={setCandidateCount} />
+          },
+          {
+            key: 'schedule',
+            label: t('aiCenter.tabSchedule'),
+            children: <ScheduleSection key={scheduleVersion} />
           }
         ]}
       />
+
+      <Modal
+        open={scheduleOpen}
+        title={t('aiCenter.addSchedule')}
+        okText={t('common.confirm')}
+        cancelText={t('common.cancel')}
+        confirmLoading={scheduleCreating}
+        onOk={() => void createSchedules()}
+        onCancel={() => setScheduleOpen(false)}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <div>
+            <Typography.Text strong>{t('aiCenter.scheduleProject')}</Typography.Text>
+            <div style={{ marginTop: 6 }}>
+              <Space size={4} wrap>
+                {projects
+                  .filter((p) => selectedIds.has(p.id))
+                  .map((p) => (
+                    <Tag key={p.id}>{p.name}</Tag>
+                  ))}
+              </Space>
+            </div>
+          </div>
+          <div>
+            <Typography.Text strong>{t('aiCenter.scheduleType')}</Typography.Text>
+            <div style={{ marginTop: 6 }}>
+              <Checkbox.Group
+                value={scheduleTypes}
+                onChange={(v) => setScheduleTypes(v as ScheduledTaskType[])}
+                options={[
+                  { value: 'ai_analysis', label: t('aiCenter.scheduleTypeAi') },
+                  { value: 'readme_analyze', label: t('aiCenter.scheduleTypeReadme') }
+                ]}
+              />
+            </div>
+          </div>
+          <div>
+            <Typography.Text strong>{t('aiCenter.scheduleStart')}</Typography.Text>
+            <DatePicker
+              showTime={{ format: 'HH:mm' }}
+              format="YYYY-MM-DD HH:mm"
+              style={{ width: '100%', marginTop: 6 }}
+              placeholder={t('aiCenter.scheduleStart')}
+              value={scheduleStartAt}
+              onChange={setScheduleStartAt}
+            />
+          </div>
+        </Space>
+      </Modal>
+
+      <Modal
+        open={analyzeOpen}
+        title={t('aiCenter.analyzeSelected', { count: selectedIds.size })}
+        okText={t('common.confirm')}
+        cancelText={t('common.cancel')}
+        confirmLoading={busy}
+        onOk={() => void runAnalyzeSelected()}
+        onCancel={() => setAnalyzeOpen(false)}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <div>
+            <Typography.Text strong>{t('aiCenter.analyzeType')}</Typography.Text>
+            <div style={{ marginTop: 6 }}>
+              <Checkbox.Group
+                value={analyzeTypes}
+                onChange={(v) => setAnalyzeTypes(v as string[])}
+                options={[
+                  { value: 'tag_analysis', label: t('aiCenter.scheduleTypeAi') },
+                  { value: 'readme_analyze', label: t('aiCenter.scheduleTypeReadme') }
+                ]}
+              />
+            </div>
+          </div>
+        </Space>
+      </Modal>
     </div>
   )
 }

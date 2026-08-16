@@ -3,12 +3,17 @@ import type {
   AddProjectResult,
   AiSummaryInfo,
   AiUsageLogInfo,
+  AutoBackupSettings,
+  BackupDirInfo,
   CandidateTagView,
   GithubAccountView,
   ProjectWithTags,
   ReadmeAnalysisInfo,
   ReleaseAnalysisInfo,
+  ReleaseFileTypeInfo,
   ReleaseInfo,
+  ScheduledTaskInfo,
+  ScheduledTaskType,
   StarredImportProgress,
   StarredImportResult,
   TagDimension,
@@ -71,6 +76,8 @@ const api = {
         lastSyncAt: string | null
         /** 最近一次历史版本分析使用的模型（「使用模型」列回退来源之一） */
         lastReleaseModel: string | null
+        /** 是否存在未开始的预约任务 */
+        scheduled: boolean
       }
     >
   > => ipcRenderer.invoke('project:listWithSummaries'),
@@ -85,6 +92,11 @@ const api = {
     results: Array<{ id: number; name: string; latest: string | null; hasUpdate: boolean }>
     checked: number
   }> => ipcRenderer.invoke('project:checkUpdateAll'),
+  /** 存在未查看新版本的项目列表（「可更新」列表） */
+  listUpdatable: (): Promise<ProjectWithTags[]> => ipcRenderer.invoke('project:listUpdatable'),
+  /** 标记项目的新版本已被查看 */
+  markUpdateSeen: (projectId: number): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('project:markUpdateSeen', projectId),
 
   // ---- 详情（M3） ----
   /** 获取版本发布记录；24h 窗口内读库（force=true 强制请求 GitHub 刷新） */
@@ -102,6 +114,9 @@ const api = {
   /** 只分析单个版本（版本卡片表头「分析」按钮），结果覆盖写入 */
   analyzeReleaseOne: (projectId: number, tagName: string): Promise<ReleaseAnalysisInfo[]> =>
     ipcRenderer.invoke('versions:analyzeOne', projectId, tagName),
+  /** 历史版本文件类型字典（本地规则 + AI 补全，去重；全局过滤下拉用） */
+  listReleaseFileTypes: (): Promise<ReleaseFileTypeInfo[]> =>
+    ipcRenderer.invoke('releaseTypes:list'),
 
   // ---- README 分析 ----
   getReadmeAnalysis: (projectId: number, language: string): Promise<ReadmeAnalysisInfo | null> =>
@@ -136,12 +151,39 @@ const api = {
   /** 按项目 id 列表批量入队（AI 分析页勾选管理）；taskIds 为本次实际入队的任务 id */
   enqueueAiMany: (ids: number[]): Promise<{ queued: number; taskIds: number[] }> =>
     ipcRenderer.invoke('ai:enqueueMany', ids),
+  /** 按项目 id × 任务类型批量入队（「分析选中」弹窗勾选 AI 分析 / README 分析） */
+  enqueueAiManyTypes: (
+    ids: number[],
+    types: string[]
+  ): Promise<{ queued: number; taskIds: number[] }> =>
+    ipcRenderer.invoke('ai:enqueueManyTypes', ids, types),
   retryTask: (taskId: number): Promise<{ ok: boolean }> => ipcRenderer.invoke('ai:retry', taskId),
   setAiPaused: (value: boolean): Promise<{ paused: boolean }> =>
     ipcRenderer.invoke('ai:setPaused', value),
   getAiPaused: (): Promise<boolean> => ipcRenderer.invoke('ai:getPaused'),
   getAiSummary: (projectId: number): Promise<AiSummaryInfo | null> =>
     ipcRenderer.invoke('ai:getSummary', projectId),
+  /** 生成五维项目画像（详情页「项目画像」手动触发），返回最新摘要 */
+  generateProfile: (projectId: number): Promise<AiSummaryInfo | null> =>
+    ipcRenderer.invoke('ai:generateProfile', projectId),
+
+  // ---- 预约任务（定时调度） ----
+  listScheduledTasks: (): Promise<ScheduledTaskInfo[]> => ipcRenderer.invoke('schedule:list'),
+  createScheduledTask: (input: {
+    projectId: number
+    type: ScheduledTaskType
+    startAt: string
+    endAt: string | null
+  }): Promise<ScheduledTaskInfo[]> => ipcRenderer.invoke('schedule:create', input),
+  deleteScheduledTask: (id: number): Promise<ScheduledTaskInfo[]> =>
+    ipcRenderer.invoke('schedule:delete', id),
+  updateScheduledTask: (input: {
+    id: number
+    projectId: number
+    startAt: string
+  }): Promise<ScheduledTaskInfo[]> => ipcRenderer.invoke('schedule:update', input),
+  clearCompletedScheduledTasks: (): Promise<ScheduledTaskInfo[]> =>
+    ipcRenderer.invoke('schedule:clearCompleted'),
 
   // ---- 设置（M4/M5） ----
   getSetting: <T>(key: string, fallback: T): Promise<T> =>
@@ -223,6 +265,13 @@ const api = {
     ipcRenderer.invoke('data:restore'),
   openBackupsDir: (): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('data:openBackupsDir'),
+  getAutoBackupSettings: (): Promise<AutoBackupSettings> =>
+    ipcRenderer.invoke('backup:settings:get'),
+  saveAutoBackupSettings: (input: AutoBackupSettings): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('backup:settings:save', input),
+  listBackupFiles: (): Promise<BackupDirInfo> => ipcRenderer.invoke('backup:files:list'),
+  pickBackupDir: (): Promise<{ ok: boolean; path?: string; canceled?: boolean }> =>
+    ipcRenderer.invoke('backup:dir:pick'),
 
   /** 订阅任务进度广播，返回取消订阅函数 */
   onTaskProgress: (callback: () => void): (() => void) => {
@@ -269,9 +318,11 @@ const api = {
   addAccount: (input: { alias?: string; token: string }): Promise<GithubAccountView> =>
     ipcRenderer.invoke('github:addAccount', input),
   /** 编辑账号：alias 可改；token 留空保留原值 */
-  updateAccount: (
-    input: { id: number; alias?: string; token?: string }
-  ): Promise<GithubAccountView | null> => ipcRenderer.invoke('github:updateAccount', input),
+  updateAccount: (input: {
+    id: number
+    alias?: string
+    token?: string
+  }): Promise<GithubAccountView | null> => ipcRenderer.invoke('github:updateAccount', input),
   deleteAccount: (id: number): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('github:deleteAccount', id),
   /** 批量验证全部账号状态（打开凭据页时调用） */

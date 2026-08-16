@@ -72,10 +72,11 @@ export default function App(): React.JSX.Element {
                   <Route path="/projects/:index" element={<ProjectList />} />
                   {/* 旧「项目库」入口重定向：项目列表统一在首页（卡片/表格视图） */}
                   <Route path="/repository" element={<Navigate to="/dashboard" replace />} />
-                  {/* 默认进入 README tab（AI 摘要已暂停）；旧 /summary 链接由 Repository 内部映射 */}
+                  {/* /repository/:id 默认进 README；项目卡片跳 /summary 进「项目画像」 */}
                   <Route path="/repository/:id" element={<Repository />} />
                   <Route path="/repository/:id/:tab" element={<Repository />} />
                   <Route path="/ai-center" element={<AICenter />} />
+                  <Route path="/ai-center/:tab" element={<AICenter />} />
                   <Route path="/usage-logs" element={<UsageLogs />} />
                   <Route path="/usage-logs/:model" element={<UsageLogs />} />
                   <Route path="/settings" element={<Navigate to="/settings/general" replace />} />

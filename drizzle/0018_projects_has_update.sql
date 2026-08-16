@@ -1,0 +1,1 @@
+ALTER TABLE `projects` ADD `has_update` integer DEFAULT 0 NOT NULL;
